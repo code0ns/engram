@@ -73,6 +73,26 @@ function RenameInput({
   );
 }
 
+/** Preset swatches — the same palette FOLDER_COLORS seeds with, plus a few extras. */
+const COLOR_PRESETS = [
+  "#3b82f6",
+  "#a855f7",
+  "#22c55e",
+  "#f59e0b",
+  "#ec4899",
+  "#06b6d4",
+  "#ef4444",
+  "#eab308",
+  "#14b8a6",
+  "#10b981",
+  "#8b5cf6",
+  "#f97316",
+  "#84cc16",
+  "#e11d48",
+  "#64748b",
+  "#71717a",
+];
+
 const HEX_RE = /^#[0-9a-f]{6}$/i;
 
 function hexToRgb(hex: string): { r: number; g: number; b: number } {
@@ -207,12 +227,22 @@ function ColorPicker({
   const [hue, setHue] = useState(startHsv.h);
   const [sat, setSat] = useState(startHsv.s);
   const [val, setVal] = useState(startHsv.v);
+  const [expanded, setExpanded] = useState(false);
   const [eyedropperSupported] = useState(
     () => typeof window !== "undefined" && "EyeDropper" in window,
   );
 
   const { r, g, b } = hsvToRgb(hue, sat, val);
   const hex = rgbToHex(r, g, b);
+
+  function setFromHex(next: string) {
+    if (!HEX_RE.test(next)) return;
+    const rgb = hexToRgb(next);
+    const hsv = rgbToHsv(rgb.r, rgb.g, rgb.b);
+    setHue(hsv.h);
+    setSat(hsv.s);
+    setVal(hsv.v);
+  }
 
   function setRgbChannel(channel: "r" | "g" | "b", value: number) {
     const clamped = Math.max(0, Math.min(255, value || 0));
@@ -240,48 +270,92 @@ function ColorPicker({
 
   return (
     <div
-      className="absolute z-50 mt-1 w-60 rounded-lg bg-popover p-3 text-sm text-popover-foreground shadow-lg ring-1 ring-foreground/10"
+      className={cn(
+        "absolute z-50 mt-1 rounded-lg bg-popover p-3 text-sm text-popover-foreground shadow-lg ring-1 ring-foreground/10 transition-[width]",
+        expanded ? "w-60" : "w-56",
+      )}
       onClick={(e) => e.stopPropagation()}
       onKeyDown={(e) => {
         if (e.key === "Escape") onCancel();
         if (e.key === "Enter") onSave(hex);
       }}
     >
-      <SvField hue={hue} s={sat} v={val} onChange={(s, v) => { setSat(s); setVal(v); }} />
-
-      <div className="mt-3 flex items-center gap-2">
-        {eyedropperSupported && (
+      <div className="grid grid-cols-8 gap-1.5">
+        {COLOR_PRESETS.map((c) => (
           <button
+            key={c}
             type="button"
-            onClick={pickWithEyedropper}
-            title="Pick from screen"
-            className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-          >
-            <Pipette size={13} />
-          </button>
-        )}
-        <span className="size-6 shrink-0 rounded-full ring-1 ring-black/10" style={{ background: hex }} />
-        <HueSlider hue={hue} onChange={setHue} />
+            onClick={() => setFromHex(c)}
+            aria-label={c}
+            className={cn(
+              "size-5 rounded-full ring-1 ring-black/10 transition-transform hover:scale-110",
+              hex.toLowerCase() === c.toLowerCase() && "ring-2 ring-foreground ring-offset-1 ring-offset-popover",
+            )}
+            style={{ background: c }}
+          />
+        ))}
       </div>
 
-      <div className="mt-3 grid grid-cols-3 gap-1.5">
-        {([
-          ["R", r, "r" as const],
-          ["G", g, "g" as const],
-          ["B", b, "b" as const],
-        ] as const).map(([label, value, channel]) => (
-          <div key={channel} className="flex flex-col items-center gap-1">
-            <input
-              type="number"
-              min={0}
-              max={255}
-              value={Math.round(value)}
-              onChange={(e) => setRgbChannel(channel, Number(e.target.value))}
-              className="w-full rounded-md border border-border bg-background px-1.5 py-1 text-center font-mono text-xs outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
-            />
-            <span className="text-[10px] text-muted-foreground">{label}</span>
+      {expanded && (
+        <div className="mt-3">
+          <SvField hue={hue} s={sat} v={val} onChange={(s, v) => { setSat(s); setVal(v); }} />
+          <div className="mt-3 flex items-center gap-2">
+            {eyedropperSupported && (
+              <button
+                type="button"
+                onClick={pickWithEyedropper}
+                title="Pick from screen"
+                className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              >
+                <Pipette size={13} />
+              </button>
+            )}
+            <HueSlider hue={hue} onChange={setHue} />
           </div>
-        ))}
+          <div className="mt-3 grid grid-cols-3 gap-1.5">
+            {([
+              ["R", r, "r" as const],
+              ["G", g, "g" as const],
+              ["B", b, "b" as const],
+            ] as const).map(([label, value, channel]) => (
+              <div key={channel} className="flex flex-col items-center gap-1">
+                <input
+                  type="number"
+                  min={0}
+                  max={255}
+                  value={Math.round(value)}
+                  onChange={(e) => setRgbChannel(channel, Number(e.target.value))}
+                  className="w-full rounded-md border border-border bg-background px-1.5 py-1 text-center font-mono text-xs outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                />
+                <span className="text-[10px] text-muted-foreground">{label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="mt-3 flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          title={expanded ? "Collapse" : "Custom color"}
+          aria-expanded={expanded}
+          className={cn(
+            "relative size-6 shrink-0 rounded-full ring-1 ring-black/10 transition-shadow",
+            expanded && "ring-2 ring-foreground ring-offset-1 ring-offset-popover",
+          )}
+          style={{ background: hex }}
+        >
+          <span className="absolute -right-1 -bottom-1 flex size-3.5 items-center justify-center rounded-full bg-popover text-foreground ring-1 ring-foreground/10">
+            <Palette size={9} />
+          </span>
+        </button>
+        <input
+          value={hex}
+          onChange={(e) => setFromHex(e.target.value)}
+          placeholder="#rrggbb"
+          className="w-full rounded-md border border-border bg-background px-2 py-1 font-mono text-xs outline-none"
+        />
       </div>
 
       <div className="mt-3 flex justify-end gap-1.5">
