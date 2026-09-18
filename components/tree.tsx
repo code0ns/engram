@@ -25,16 +25,16 @@ import {
 } from "@/components/ui/alert-dialog";
 
 /** Parent directory of a vault-relative path ("" for something at the vault root). */
-function dirOf(p: string): string {
+export function dirOf(p: string): string {
   const i = p.lastIndexOf("/");
   return i === -1 ? "" : p.slice(0, i);
 }
 
-function join(dir: string, name: string): string {
+export function join(dir: string, name: string): string {
   return dir ? `${dir}/${name}` : name;
 }
 
-function useVaultMutations() {
+export function useVaultMutations() {
   const { mutate } = useSWRConfig();
   return () => {
     mutate("/api/tree");
@@ -43,7 +43,7 @@ function useVaultMutations() {
   };
 }
 
-function RenameInput({
+export function RenameInput({
   initial,
   onSubmit,
   onCancel,
@@ -213,7 +213,7 @@ function HueSlider({ hue, onChange }: { hue: number; onChange: (h: number) => vo
  *  OS-native dialog that clashes with everything else in the app (square corners, wrong font,
  *  no explicit save/cancel). Positioned relative to its parent `<li>` (needs `position: relative`
  *  there); matches ContextMenuContent/DialogContent styling so it looks like part of the app. */
-function ColorPicker({
+export function ColorPicker({
   initial,
   onSave,
   onCancel,
@@ -428,19 +428,34 @@ function Dir({ node, activePath, depth }: { node: TreeNode; activePath?: string;
     <li className="relative">
       <ContextMenu>
         <ContextMenuTrigger asChild>
-          <button
-            onClick={() => setOpen((o) => !o)}
-            className="flex w-full items-center gap-1 rounded-md py-1 pr-2 text-left text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          <div
+            role="button"
+            tabIndex={0}
+            onClick={() => router.push(`/f/${node.path}`)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") router.push(`/f/${node.path}`);
+            }}
+            className="flex w-full cursor-pointer items-center gap-1 rounded-md py-1 pr-2 text-left text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
             style={{ paddingLeft: depth * 12 + 8 }}
           >
-            <ChevronRight size={14} className={cn("shrink-0 transition-transform", open && "rotate-90")} />
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setOpen((o) => !o);
+              }}
+              className="shrink-0"
+              aria-label={open ? "Collapse folder" : "Expand folder"}
+            >
+              <ChevronRight size={14} className={cn("transition-transform", open && "rotate-90")} />
+            </button>
             <span className="size-1.5 shrink-0 rounded-full" style={{ background: color }} />
             {renaming ? (
               <RenameInput initial={node.name} onSubmit={rename} onCancel={() => setRenaming(false)} />
             ) : (
               <span className="truncate">{node.name}</span>
             )}
-          </button>
+          </div>
         </ContextMenuTrigger>
         <ContextMenuContent>
           <ContextMenuItem onSelect={() => setRenaming(true)}>

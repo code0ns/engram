@@ -409,12 +409,17 @@ export interface ActivityEntry {
  * git-sync commits look like `brain: N change(s) — …`), most-recent first. Read-only. Empty
  * unless the vault is its own git repo (see gitVaultDir), so we never surface Engram's own
  * history via the sample vault.
+ *
+ * `scopePath` limits this to commits that touched files under that vault-relative folder (git's
+ * own path-scoped log) — used by the folder-browser view's "Recent activity" section.
  */
-export async function vaultActivity(maxCount = 50): Promise<ActivityEntry[]> {
+export async function vaultActivity(maxCount = 50, scopePath?: string): Promise<ActivityEntry[]> {
   const dir = gitVaultDir();
   if (!dir) return [];
   try {
-    const log = await gitRead(`activity:${dir}:${maxCount}`, ACTIVITY_TTL_MS, () => vaultGit(dir).log({ maxCount }));
+    const log = await gitRead(`activity:${dir}:${maxCount}:${scopePath ?? ""}`, ACTIVITY_TTL_MS, () =>
+      vaultGit(dir).log(scopePath ? { maxCount, file: scopePath } : { maxCount }),
+    );
     return log.all.map((c) => ({
       hash: c.hash.slice(0, 7),
       message: c.message,
