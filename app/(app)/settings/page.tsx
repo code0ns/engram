@@ -34,6 +34,12 @@ interface PublicSettings {
   envManaged: Record<string, boolean>;
 }
 
+interface PublicPaperclipSettings {
+  baseUrl: string;
+  apiKeySet: boolean;
+  wslDistro: string;
+}
+
 function Field({ children, hint }: { children: React.ReactNode; hint?: string }) {
   return (
     <div className="space-y-1.5">
@@ -45,6 +51,7 @@ function Field({ children, hint }: { children: React.ReactNode; hint?: string })
 
 export default function SettingsPage() {
   const { data } = useSWR<PublicSettings>("/api/settings", fetcher);
+  const { data: pcData } = useSWR<PublicPaperclipSettings>("/api/paperclip/settings", fetcher);
   const { mutate } = useSWRConfig();
 
   const [appNameV, setAppName] = useState("");
@@ -57,6 +64,9 @@ export default function SettingsPage() {
   const [apiKey, setApiKey] = useState("");
   const [ghId, setGhId] = useState("");
   const [ghSecret, setGhSecret] = useState("");
+  const [pcBaseUrl, setPcBaseUrl] = useState("");
+  const [pcApiKey, setPcApiKey] = useState("");
+  const [pcWslDistro, setPcWslDistro] = useState("");
 
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -73,6 +83,12 @@ export default function SettingsPage() {
     setGhId(data.githubClientId);
   }, [data]);
 
+  useEffect(() => {
+    if (!pcData) return;
+    setPcBaseUrl(pcData.baseUrl);
+    setPcWslDistro(pcData.wslDistro);
+  }, [pcData]);
+
   async function save() {
     if (saving) return;
     setSaving(true);
@@ -88,17 +104,28 @@ export default function SettingsPage() {
     };
     if (apiKey.trim()) patch.anthropicApiKey = apiKey.trim();
     if (ghSecret.trim()) patch.githubClientSecret = ghSecret.trim();
+    const pcPatch: Record<string, unknown> = { baseUrl: pcBaseUrl, wslDistro: pcWslDistro };
+    if (pcApiKey.trim()) pcPatch.apiKey = pcApiKey.trim();
     try {
-      await fetch("/api/settings", {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(patch),
-      });
+      await Promise.all([
+        fetch("/api/settings", {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(patch),
+        }),
+        fetch("/api/paperclip/settings", {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(pcPatch),
+        }),
+      ]);
       setApiKey("");
       setGhSecret("");
+      setPcApiKey("");
       mutate("/api/settings");
       mutate("/api/features");
       mutate("/api/github/status");
+      mutate("/api/paperclip/settings");
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } finally {
@@ -114,6 +141,15 @@ export default function SettingsPage() {
     });
     mutate("/api/settings");
     mutate("/api/features");
+  }
+
+  async function clearPaperclipKey() {
+    await fetch("/api/paperclip/settings", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ clearApiKey: true }),
+    });
+    mutate("/api/paperclip/settings");
   }
 
   if (!data) {
@@ -312,6 +348,56 @@ export default function SettingsPage() {
               </div>
             </Field>
           </div>
+        </section>
+
+        {/* Paperclip (agent orchestration) */}
+        <section className="mt-6 space-y-4 border-t border-border pt-6">
+          <div>
+            <h2 className="text-sm font-medium">Paperclip</h2>
+            <p className="text-xs text-muted-foreground">
+              Connects the Agents page to a Paperclip instance for hiring, budgeting, and running AI
+              agents. Local trusted mode needs no API key.
+            </p>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <Field hint="Paperclip&apos;s API base, e.g. http://localhost:3100/api">
+              <Label htmlFor="pcBaseUrl">Base URL</Label>
+              <Input
+                id="pcBaseUrl"
+                value={pcBaseUrl}
+                onChange={(e) => setPcBaseUrl(e.target.value)}
+                placeholder="http://localhost:3100/api"
+              />
+            </Field>
+            <Field hint={pcData?.apiKeySet ? "A key is set. Type a new value to replace it." : "Only needed in authenticated/private mode."}>
+              <Label htmlFor="pcApiKey">
+                API key {pcData?.apiKeySet && <span className="text-primary">• set</span>}
+              </Label>
+              <div className="flex gap-2">
+                <Input
+                  id="pcApiKey"
+                  type="password"
+                  value={pcApiKey}
+                  onChange={(e) => setPcApiKey(e.target.value)}
+                  placeholder={pcData?.apiKeySet ? "••••••••••••••••" : "optional"}
+                />
+                {pcData?.apiKeySet && (
+                  <Button variant="outline" size="sm" className="shrink-0 text-muted-foreground hover:text-destructive" onClick={clearPaperclipKey}>
+                    Remove
+                  </Button>
+                )}
+              </div>
+            </Field>
+          </div>
+          <Field hint="Only set this if Paperclip runs inside WSL while Engram runs on native Windows — lets Link-to-Engram write .mcp.json into the agent's Linux cwd via the wsl.localhost share.">
+            <Label htmlFor="pcWslDistro">WSL distro (optional)</Label>
+            <Input
+              id="pcWslDistro"
+              value={pcWslDistro}
+              onChange={(e) => setPcWslDistro(e.target.value)}
+              placeholder="Ubuntu-24.04"
+            />
+          </Field>
         </section>
 
         {/* Env-only note */}
