@@ -6,7 +6,8 @@ export const fetcher = (url: string) =>
     return r.json();
   });
 
-/** Muted, distinguishable folder colors for the graph + tree accents. */
+/** Seed colors for the sample vault's own taxonomy — kept so a fresh clone still looks curated
+ *  out of the box. A real vault's folder names won't match these; see `hashColor` below. */
 export const FOLDER_COLORS: Record<string, string> = {
   clients: "#3b82f6",
   decisions: "#a855f7",
@@ -24,6 +25,26 @@ export const FOLDER_COLORS: Record<string, string> = {
   root: "#a1a1aa",
 };
 
-export function folderColor(folder: string): string {
-  return FOLDER_COLORS[folder] ?? "#a1a1aa";
+/**
+ * Deterministic HSL color from a folder name, so any folder gets a stable, distinguishable
+ * color even outside FOLDER_COLORS or a user override. Previously every folder not in the
+ * sample-vault's taxonomy fell through to one flat gray ("#a1a1aa") — which was every folder,
+ * in any real vault.
+ */
+function hashColor(name: string): string {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) {
+    hash = (hash << 5) - hash + name.charCodeAt(i);
+    hash |= 0;
+  }
+  const hue = Math.abs(hash) % 360;
+  return `hsl(${hue} 62% 55%)`;
+}
+
+/**
+ * Resolve a folder's display color: a user override (set via the sidebar's color picker) wins,
+ * then the sample-vault seed map, then the hash fallback — so nothing renders flat gray.
+ */
+export function folderColor(folder: string, overrides?: Record<string, string>): string {
+  return overrides?.[folder] ?? FOLDER_COLORS[folder] ?? hashColor(folder);
 }

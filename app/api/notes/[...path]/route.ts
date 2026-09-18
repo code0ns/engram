@@ -3,7 +3,7 @@ import { verifySessionToken } from "@/lib/auth";
 import { withActor } from "@/lib/actor";
 import { getBacklinks, getNote, getOutlinks } from "@/lib/vault/store";
 import { checkFrontmatter } from "@/lib/vault/validate";
-import { deleteNote, writeNoteRaw } from "@/lib/vault/write";
+import { deleteNote, moveNote, writeNoteRaw } from "@/lib/vault/write";
 
 export const dynamic = "force-dynamic";
 
@@ -44,6 +44,21 @@ export async function PUT(req: Request, { params }: { params: Promise<{ path: st
           warning: `Frontmatter is not valid YAML (${check.error}) — this note's status, tags and title are being ignored. Usual cause: an unquoted ":" in a value.`,
         }),
   });
+}
+
+/** Rename/move a single note. Body: { to: "new/path.md" }. */
+export async function PATCH(req: Request, { params }: { params: Promise<{ path: string[] }> }) {
+  const { path } = await params;
+  const rel = path.map(decodeURIComponent).join("/");
+  const { to } = await req.json().catch(() => ({}));
+  if (!to || typeof to !== "string") return Response.json({ error: "to (string) required" }, { status: 400 });
+  const actor = await actorFor(req);
+  try {
+    const saved = await withActor(actor, () => moveNote(rel, to));
+    return Response.json({ ok: true, path: saved });
+  } catch (e) {
+    return Response.json({ error: e instanceof Error ? e.message : "rename failed" }, { status: 400 });
+  }
 }
 
 export async function DELETE(req: Request, { params }: { params: Promise<{ path: string[] }> }) {

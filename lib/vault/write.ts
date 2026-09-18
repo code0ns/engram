@@ -2,7 +2,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import matter from "gray-matter";
 import { activeVaultDir } from "@/lib/repos";
-import { refreshPaths, getNote } from "./store";
+import { refreshPaths, getNote, listNotes } from "./store";
 import { humanize, stemOf } from "./parse";
 import { checkFrontmatter, frontmatterErrorMessage } from "./validate";
 import { guardConflict } from "./conflict";
@@ -276,4 +276,58 @@ export async function createFolder(relPath: string): Promise<string> {
   await fsp.writeFile(path.join(abs, ".gitkeep"), "", "utf8");
   requestSync(`${currentActor()}: mkdir ${p}`);
   return p;
+}
+
+function cleanFolderPath(relPath: string): string {
+  return relPath.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").replace(/\.\.(\/|$)/g, "");
+}
+
+/**
+ * Rename/move a folder by moving every note under it, one at a time, then one sync commit.
+ * Folders are not real objects here — they only exist because notes live under that path
+ * prefix — so "renaming" one means rewriting every note's path under the new prefix.
+ */
+export async function renameFolder(from: string, to: string): Promise<{ moved: number }> {
+  const fromP = cleanFolderPath(from);
+  const toP = cleanFolderPath(to);
+  if (!fromP || !toP) throw new Error("renameFolder: both paths are required");
+  if (fromP === toP) throw new Error("renameFolder: from and to must differ");
+  const prefix = `${fromP}/`;
+  const notes = listNotes().filter((n) => n.path.startsWith(prefix));
+  if (notes.length === 0) throw new Error(`renameFolder: no notes found under ${fromP}/`);
+  const touched: string[] = [];
+  for (const n of notes) {
+    const rest = n.path.slice(prefix.length);
+    const dest = `${toP}/${rest}`;
+    const a = safeAbs(dest.replace(/\.md$/i, "") + ".md");
+    await fsp.mkdir(path.dirname(a), { recursive: true });
+    await fsp.rename(safeAbs(n.path), a);
+    touched.push(n.path, dest);
+  }
+  refreshPaths(touched);
+  requestSync(`${currentActor()}: rename folder ${fromP} -> ${toP} (${notes.length} note(s))`);
+  return { moved: notes.length };
+}
+
+/** Delete every note under a folder prefix, then one sync commit. Irreversible — the caller
+ *  (the dashboard) is responsible for confirming with the human first. */
+export async function deleteFolderRecursive(relPath: string): Promise<{ deleted: number }> {
+  const p = cleanFolderPath(relPath);
+  if (!p) throw new Error("deleteFolderRecursive: path is required");
+  const prefix = `${p}/`;
+  const notes = listNotes().filter((n) => n.path.startsWith(prefix));
+  const touched: string[] = [];
+  for (const n of notes) {
+    await fsp.rm(safeAbs(n.path));
+    touched.push(n.path);
+  }
+  // The folder itself may still exist on disk (a .gitkeep, or now-empty) — remove it too.
+  try {
+    await fsp.rm(safeAbs(p), { recursive: true, force: true });
+  } catch {
+    /* already gone */
+  }
+  refreshPaths(touched);
+  requestSync(`${currentActor()}: delete folder ${p} (${notes.length} note(s))`);
+  return { deleted: notes.length };
 }

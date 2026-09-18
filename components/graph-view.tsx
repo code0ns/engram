@@ -32,6 +32,7 @@ const nodeRadius = (d: SimNode) => 3 + Math.sqrt(d.degree) * 1.8;
 
 export function GraphView() {
   const { data } = useSWR<Graph>("/api/graph", fetcher);
+  const { data: colorData } = useSWR<{ colors: Record<string, string> }>("/api/folder-colors", fetcher);
   const router = useRouter();
   const wrapRef = useRef<HTMLDivElement>(null);
   const simRef = useRef<Simulation<SimNode, SimLink> | null>(null);
@@ -172,7 +173,7 @@ export function GraphView() {
               <g key={n.id} transform={`translate(${n.x},${n.y})`}>
                 <circle
                   r={r}
-                  fill={folderColor(n.folder)}
+                  fill={folderColor(n.folder, colorData?.colors)}
                   stroke="var(--background)"
                   strokeWidth={1 / view.k}
                   className="cursor-pointer"
