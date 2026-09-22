@@ -81,9 +81,9 @@ export const SESSION_COOKIE = "engram_session";
  */
 
 /**
- * Env default for the git-sync loop (commit + push the active vault). ON by default —
+ * Env default for the git-sync loop (commit + push a workspace). ON by default —
  * it's a headline feature; set GIT_SYNC_ENABLED="false" to opt out. Only ever acts on a
- * connected workspace repo (guarded by getActive() in lib/git.ts), never the sample vault.
+ * connected workspace repo (guarded by gitVaultDir() in lib/git.ts), never the sample vault.
  */
 export const GIT_SYNC_ENABLED = process.env.GIT_SYNC_ENABLED !== "false";
 /** Env default commit identity for git-sync. */

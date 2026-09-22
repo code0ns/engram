@@ -3,7 +3,6 @@ import path from "node:path";
 import MiniSearch from "minisearch";
 import { watch, type FSWatcher } from "chokidar";
 import { VAULT_IGNORE } from "@/lib/config";
-import { activeVaultDir } from "@/lib/repos";
 import { scanVault } from "./scan";
 import { parseNote, stemOf } from "./parse";
 import { authorityOf, authorityRules, isArchivedPath, isUnrecognizedStatus, overlayValidity, weightOf, type Authority } from "./authority";
@@ -42,9 +41,14 @@ interface IndexState {
   builtAt: number;
 }
 
-let state: IndexState | null = null;
-let watcher: FSWatcher | null = null;
-let watchedDir = "";
+/**
+ * One index + one watcher per vault directory, not a single global — different callers can
+ * now be resolved to different workspaces (lib/workspace-resolve.ts) and must get correct,
+ * isolated answers even when queried concurrently. Bounded by how many workspaces exist
+ * (an admin action, lib/repos.ts), so no eviction/LRU: a handful of live indices is cheap.
+ */
+const states = new Map<string, IndexState>();
+const watchers = new Map<string, FSWatcher>();
 
 function newIndex(): MiniSearch<IndexDoc> {
   return new MiniSearch<IndexDoc>({
@@ -132,8 +136,7 @@ function recomputeLinks(s: IndexState): void {
   }
 }
 
-function buildState(): IndexState {
-  const dir = activeVaultDir();
+function buildState(dir: string): IndexState {
   const s: IndexState = {
     dir,
     notes: new Map(),
@@ -194,14 +197,9 @@ function remove(s: IndexState, rel: string): void {
 }
 
 function startWatcher(dir: string) {
-  if (watcher && watchedDir === dir) return;
-  if (watcher) {
-    watcher.close().catch(() => {});
-    watcher = null;
-  }
-  watchedDir = dir;
+  if (watchers.has(dir)) return;
   try {
-    watcher = watch(dir, {
+    const watcher = watch(dir, {
       ignoreInitial: true,
       persistent: true,
       depth: 12,
@@ -211,6 +209,7 @@ function startWatcher(dir: string) {
         return [...VAULT_IGNORE].some((ig) => base === ig || p.includes(`${path.sep}${ig}${path.sep}`));
       },
     });
+    watchers.set(dir, watcher);
 
     const pending = new Set<string>();
     let t: ReturnType<typeof setTimeout> | null = null;
@@ -218,11 +217,12 @@ function startWatcher(dir: string) {
 
     const flush = () => {
       try {
-        if (fullRebuild || !state || state.dir !== dir) {
-          state = buildState();
+        const s = states.get(dir);
+        if (fullRebuild || !s) {
+          states.set(dir, buildState(dir));
         } else {
-          for (const rel of pending) if (!upsert(state, rel)) remove(state, rel);
-          recomputeLinks(state);
+          for (const rel of pending) if (!upsert(s, rel)) remove(s, rel);
+          recomputeLinks(s);
         }
       } catch (e) {
         console.error("[vault] index update failed", e);
@@ -251,22 +251,37 @@ function startWatcher(dir: string) {
   }
 }
 
-function ensure(): IndexState {
-  const dir = activeVaultDir();
-  if (!state || state.dir !== dir) state = buildState();
+function ensure(dir: string): IndexState {
+  let s = states.get(dir);
+  if (!s) {
+    s = buildState(dir);
+    states.set(dir, s);
+  }
   startWatcher(dir);
-  return state;
+  return s;
 }
 
-/** Force a synchronous full rebuild (workspace switch, or after a git pull changed many files). */
-export function rebuildIndex(): void {
-  state = buildState();
-  startWatcher(state.dir);
+/** Force a synchronous full rebuild of one workspace (after a git pull changed many files). */
+export function rebuildIndex(dir: string): void {
+  states.set(dir, buildState(dir));
+  startWatcher(dir);
 }
 
-/** Update just these paths (created, edited, moved, or deleted). No full re-scan. */
-export function refreshPaths(relPaths: string[]): void {
-  const s = ensure();
+/** Drop a workspace's in-memory index and close its watcher — called when a workspace is
+ *  removed (lib/repos.ts's removeRepo), so a deleted directory doesn't keep a live chokidar
+ *  watch or a stale index entry around forever. */
+export function forgetWorkspace(dir: string): void {
+  states.delete(dir);
+  const w = watchers.get(dir);
+  if (w) {
+    w.close().catch(() => {});
+    watchers.delete(dir);
+  }
+}
+
+/** Update just these paths (created, edited, moved, or deleted) in one workspace. No full re-scan. */
+export function refreshPaths(dir: string, relPaths: string[]): void {
+  const s = ensure(dir);
   for (const rel of relPaths) {
     if (!rel.toLowerCase().endsWith(".md")) continue;
     if (!upsert(s, rel)) remove(s, rel);
@@ -274,20 +289,20 @@ export function refreshPaths(relPaths: string[]): void {
   recomputeLinks(s);
 }
 
-export function listNotes(): NoteMeta[] {
-  return [...ensure().notes.values()];
+export function listNotes(dir: string): NoteMeta[] {
+  return [...ensure(dir).notes.values()];
 }
 
 /** Notes ordered by last modification, newest first. Powers "what changed lately". */
-export function listRecent(sinceMs?: number, limit = 20): NoteMeta[] {
-  return [...ensure().notes.values()]
+export function listRecent(dir: string, sinceMs?: number, limit = 20): NoteMeta[] {
+  return [...ensure(dir).notes.values()]
     .filter((n) => (sinceMs ? n.mtimeMs >= sinceMs : true))
     .sort((a, b) => b.mtimeMs - a.mtimeMs)
     .slice(0, limit);
 }
 
-export function getNote(relPath: string): Note | null {
-  const s = ensure();
+export function getNote(dir: string, relPath: string): Note | null {
+  const s = ensure(dir);
   // Caller-controlled (brain_read, the dashboard note route) — must not escape the vault.
   const abs = tryResolveInVault(s.dir, relPath);
   if (!abs) return null;
@@ -384,8 +399,8 @@ interface StoredDoc {
  * all. A retired note is withheld from `hits` and reported in `excluded` with a reason — so an
  * agent can state what it ignored and why, instead of quietly quoting a dead fact.
  */
-export function searchNotes(q: string, opts: SearchOpts = {}): SearchResult {
-  const s = ensure();
+export function searchNotes(dir: string, q: string, opts: SearchOpts = {}): SearchResult {
+  const s = ensure(dir);
   if (!q.trim()) return { hits: [], excluded: [] };
   const { limit = 20, folder, includeArchive = false, includeInvalid = false, snippets = true } = opts;
   const now = Date.now();
@@ -449,13 +464,13 @@ export function searchNotes(q: string, opts: SearchOpts = {}): SearchResult {
   return { hits, excluded };
 }
 
-export function getBacklinks(relPath: string): NoteMeta[] {
-  const s = ensure();
+export function getBacklinks(dir: string, relPath: string): NoteMeta[] {
+  const s = ensure(dir);
   return [...(s.inEdges.get(relPath) ?? [])].map((p) => s.notes.get(p)).filter(Boolean) as NoteMeta[];
 }
 
-export function getOutlinks(relPath: string): NoteMeta[] {
-  const s = ensure();
+export function getOutlinks(dir: string, relPath: string): NoteMeta[] {
+  const s = ensure(dir);
   return [...(s.outEdges.get(relPath) ?? [])].map((p) => s.notes.get(p)).filter(Boolean) as NoteMeta[];
 }
 
@@ -463,8 +478,8 @@ export function getOutlinks(relPath: string): NoteMeta[] {
  * What this vault actually looks like + how search will treat it. Returned by brain_schema so
  * an agent meeting an unfamiliar vault discovers its conventions instead of assuming ours.
  */
-export function vaultConventions() {
-  const s = ensure();
+export function vaultConventions(dir: string) {
+  const s = ensure(dir);
   const folders = new Set<string>();
   const statuses = new Map<string, number>();
   const types = new Set<string>();
@@ -547,8 +562,8 @@ export function vaultConventions() {
   };
 }
 
-export function getGraph(folder?: string): Graph {
-  const s = ensure();
+export function getGraph(dir: string, folder?: string): Graph {
+  const s = ensure(dir);
   const inScope = (p: string) => !folder || s.notes.get(p)?.folder === folder;
   const degree = new Map<string, number>();
   const bump = (p: string) => degree.set(p, (degree.get(p) ?? 0) + 1);
@@ -569,8 +584,8 @@ export function getGraph(folder?: string): Graph {
   return { nodes, edges };
 }
 
-export function getTree(): TreeNode {
-  const s = ensure();
+export function getTree(dir: string): TreeNode {
+  const s = ensure(dir);
   const root: TreeNode = { name: "", path: "", type: "dir", children: [] };
   const dirs = new Map<string, TreeNode>([["", root]]);
 
@@ -598,10 +613,10 @@ export function getTree(): TreeNode {
   return root;
 }
 
-/** Read a top-level meta file (SCHEMA.md / INDEX.md) from the active vault, or null. */
-export function readVaultFile(name: string): string | null {
+/** Read a top-level meta file (SCHEMA.md / INDEX.md) from the given vault, or null. */
+export function readVaultFile(dir: string, name: string): string | null {
   try {
-    const abs = tryResolveInVault(activeVaultDir(), name);
+    const abs = tryResolveInVault(dir, name);
     if (!abs) return null;
     return fs.readFileSync(abs, "utf8");
   } catch {

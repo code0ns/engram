@@ -1,5 +1,7 @@
 import { createSessionToken, exchangeCodeForUser, isAllowed } from "@/lib/auth";
 import { APP_URL, SESSION_COOKIE } from "@/lib/config";
+import { grantedWorkspacesFor } from "@/lib/workspace-resolve";
+import { getActive } from "@/lib/repos";
 
 export const dynamic = "force-dynamic";
 
@@ -29,7 +31,12 @@ export async function GET(req: Request) {
   if (!user) return redirect("/login?error=google");
   if (!isAllowed(user.email)) return redirect("/login?error=not-allowed");
 
-  const token = await createSessionToken(user);
+  // Seed an initial current workspace so a brand-new session isn't workspace-less: prefer
+  // the legacy global default if the user is granted it, else their first granted workspace.
+  const granted = grantedWorkspacesFor(user.email);
+  const active = getActive();
+  const initialWorkspaceId = (active && granted.find((r) => r.id === active.id)?.id) ?? granted[0]?.id;
+  const token = await createSessionToken({ ...user, workspaceId: initialWorkspaceId });
   const secure = APP_URL.startsWith("https");
   const flag = secure ? "; Secure" : "";
   const next = cookies.auth_next && cookies.auth_next.startsWith("/") && !cookies.auth_next.startsWith("//") ? cookies.auth_next : "/";

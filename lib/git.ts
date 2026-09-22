@@ -2,35 +2,45 @@ import fs from "node:fs";
 import path from "node:path";
 import { simpleGit, type StatusResult } from "simple-git";
 import { SKIPPED, gitPausedFor, gitRead, invalidateGitReads, runGit, tryRunGit } from "@/lib/git-queue";
-import { activeVaultDir, getActive } from "@/lib/repos";
+import { listRepos, vaultDirFor } from "@/lib/repos";
 import { gitAuthor, gitSyncEnabled } from "@/lib/settings";
 import { rebuildIndex } from "@/lib/vault/store";
 
 /**
- * The debounce queue and the pull loop, on `globalThis` for the same reason the git queue is
- * (see lib/git-queue.ts): this module is compiled into several server chunks, so a plain `let`
- * gives the instrumentation entry and each group of API routes a copy of its own. Several
- * `pending` arrays and several 2.5s debounce timers meant a note write and a folder write in the
- * same window each started their own commit → pull → push cycle against one clone. Sharing the
- * state is what makes the single-writer guarantee hold across route boundaries.
+ * One sync/pull state per workspace directory, not a single global — different workspaces
+ * can now be written to concurrently (lib/workspace-resolve.ts), and a note write in one
+ * must not share a debounce timer or pending-reasons list with a write in another.
+ *
+ * Kept on `globalThis` for the same reason as before (see lib/git-queue.ts): this module is
+ * compiled into several server chunks, so a plain module-level `Map` would still give each
+ * chunk its own copy. Sharing via `globalThis` is what makes the single-writer guarantee
+ * hold across route boundaries.
  */
 interface SyncState {
   timer: ReturnType<typeof setTimeout> | null;
   pending: string[];
   /** The last thing that went wrong in a sync, surfaced by syncStatus() instead of only console. */
   lastError?: string;
-  pullTimer: ReturnType<typeof setTimeout> | null;
   /** Consecutive pull failures — drives the loop's exponential backoff. */
   pullFailures: number;
 }
 
 const SYNC_KEY = Symbol.for("engram.git.sync");
-type GlobalWithSync = typeof globalThis & { [SYNC_KEY]?: SyncState };
+type GlobalWithSync = typeof globalThis & { [SYNC_KEY]?: Map<string, SyncState> };
 
-function syncState(): SyncState {
+function syncState(dir: string): SyncState {
   const g = globalThis as GlobalWithSync;
-  return (g[SYNC_KEY] ??= { timer: null, pending: [], pullTimer: null, pullFailures: 0 });
+  const map = (g[SYNC_KEY] ??= new Map());
+  let s = map.get(dir);
+  if (!s) {
+    s = { timer: null, pending: [], pullFailures: 0 };
+    map.set(dir, s);
+  }
+  return s;
 }
+
+const PULL_LOOP_KEY = Symbol.for("engram.git.pullLoopStarted");
+type GlobalWithLoop = typeof globalThis & { [PULL_LOOP_KEY]?: boolean };
 
 /**
  * How long a `syncStatus()` / `vaultActivity()` answer may be reused.
@@ -51,8 +61,7 @@ const ACTIVITY_TTL_MS = 8_000;
  * has no `.git` of its own and would otherwise resolve to Engram's own repo. Returns null if
  * unsafe, so we never commit the app itself or surface its history.
  */
-export function gitVaultDir(): string | null {
-  const dir = activeVaultDir();
+export function gitVaultDir(dir: string): string | null {
   return fs.existsSync(path.join(dir, ".git")) ? dir : null;
 }
 
@@ -142,15 +151,15 @@ async function pullRebase(g: ReturnType<typeof vaultGit>, up: ReturnType<typeof 
 }
 
 /**
- * Debounced commit + pull --rebase + push of the active vault. No-op unless git-sync is on
- * AND the vault is its own git repo (see gitVaultDir).
+ * Debounced commit + pull --rebase + push of one workspace. No-op unless git-sync is on
+ * AND the workspace is its own git repo (see gitVaultDir).
  */
-export function requestSync(reason: string): void {
-  if (!gitSyncEnabled() || !gitVaultDir()) return;
-  const s = syncState();
+export function requestSync(dir: string, reason: string): void {
+  if (!gitSyncEnabled() || !gitVaultDir(dir)) return;
+  const s = syncState(dir);
   s.pending.push(reason);
   if (s.timer) clearTimeout(s.timer);
-  s.timer = setTimeout(runSync, 2500);
+  s.timer = setTimeout(() => runSync(dir), 2500);
 }
 
 export interface SyncOutcome {
@@ -192,15 +201,16 @@ async function abortRebaseIfAny(dir: string, g: ReturnType<typeof vaultGit>): Pr
 }
 
 /**
- * Commit everything dirty in the vault, then rebase onto the remote and push. Runs under the git
- * lock. Always returns an outcome — never `undefined` — so the caller can tell "ran" from "skipped".
+ * Commit everything dirty in one workspace, then rebase onto the remote and push. Runs under
+ * the git lock. Always returns an outcome — never `undefined` — so the caller can tell "ran"
+ * from "skipped".
  */
-async function syncOnce(reasons: string[]): Promise<SyncOutcome> {
+async function syncOnce(dir: string, reasons: string[]): Promise<SyncOutcome> {
   const out: SyncOutcome = { committed: false, pulled: false, pushed: false };
   try {
-    const dir = gitVaultDir(); // may have changed since the debounce fired
-    if (!dir) return out;
-    const g = vaultGit(dir);
+    const vaultDir = gitVaultDir(dir); // may have changed (workspace deleted) since the debounce fired
+    if (!vaultDir) return out;
+    const g = vaultGit(vaultDir);
     await g.add(["-A"]);
     const status = await g.status();
     if (status.files.length === 0) return out;
@@ -208,19 +218,20 @@ async function syncOnce(reasons: string[]): Promise<SyncOutcome> {
     out.committed = true;
 
     // Commit FIRST, then rebase — so the working tree is clean and the rebase has nothing to
-    // stash. Deliberately no `--autostash`: see the note on pullActive. If a write landed in the
-    // gap, `git pull --rebase` refuses on a dirty tree, which loses nothing; the next tick retries.
+    // stash. Deliberately no `--autostash`: see the note on pullWorkspace. If a write landed in
+    // the gap, `git pull --rebase` refuses on a dirty tree, which loses nothing; the next tick
+    // retries.
     const before = await g.revparse(["HEAD"]).catch(() => "");
     try {
       await pullRebase(g, upstreamOf(status)); // committing does not move the branch or its upstream
       out.pulled = true;
       const after = await g.revparse(["HEAD"]).catch(() => "");
       // A rebase that replayed our commit over remote work rewrote the tree; the index must
-      // follow. Previously only pullActive rebuilt, so commits arriving down THIS path left
+      // follow. Previously only pullWorkspace rebuilt, so commits arriving down THIS path left
       // search answering from pre-pull content until the watcher happened to catch up.
-      if (before !== after) rebuildIndex();
+      if (before !== after) rebuildIndex(vaultDir);
     } catch (e) {
-      const aborted = await abortRebaseIfAny(dir, g);
+      const aborted = await abortRebaseIfAny(vaultDir, g);
       out.error = aborted
         ? `vault diverged from its remote and the rebase conflicted; the local commit is intact but unpushed. Merge by hand. (${errText(e)})`
         : errText(e);
@@ -245,18 +256,18 @@ async function syncOnce(reasons: string[]): Promise<SyncOutcome> {
   return out;
 }
 
-async function runSync(): Promise<void> {
-  const s = syncState();
+async function runSync(dir: string): Promise<void> {
+  const s = syncState(dir);
   const reasons = s.pending;
   s.pending = [];
   s.timer = null; // this timer has fired; anything scheduled during the await is a new one
-  const outcome = await tryRunGit(() => syncOnce(reasons));
+  const outcome = await tryRunGit(() => syncOnce(dir, reasons));
   if (outcome === SKIPPED) {
     // Git was busy with a pull. The changed files are still dirty on disk, so don't drop them:
     // re-queue the reasons and retry once the repo is free.
     s.pending.unshift(...reasons);
     if (s.timer) clearTimeout(s.timer);
-    s.timer = setTimeout(runSync, 2500);
+    s.timer = setTimeout(() => runSync(dir), 2500);
     return;
   }
   s.lastError = outcome.error;
@@ -264,14 +275,14 @@ async function runSync(): Promise<void> {
 }
 
 /** Run the debounced sync immediately. Returns SKIPPED-as-null when a pull holds the repo. */
-export async function syncNow(reason = "manual sync"): Promise<SyncOutcome | null> {
-  if (!gitSyncEnabled() || !gitVaultDir()) return null;
-  const s = syncState();
+export async function syncNow(dir: string, reason = "manual sync"): Promise<SyncOutcome | null> {
+  if (!gitSyncEnabled() || !gitVaultDir(dir)) return null;
+  const s = syncState(dir);
   const reasons = s.pending.length > 0 ? s.pending : [reason];
   s.pending = [];
   if (s.timer) clearTimeout(s.timer);
   s.timer = null;
-  const outcome = await tryRunGit(() => syncOnce(reasons));
+  const outcome = await tryRunGit(() => syncOnce(dir, reasons));
   if (outcome === SKIPPED) {
     s.pending.unshift(...reasons);
     return null;
@@ -281,22 +292,22 @@ export async function syncNow(reason = "manual sync"): Promise<SyncOutcome | nul
   return outcome;
 }
 
-/** Test seam: the reasons still waiting to be committed. */
-export function pendingReasons(): string[] {
-  return [...syncState().pending];
+/** Test seam: the reasons still waiting to be committed for this workspace. */
+export function pendingReasons(dir: string): string[] {
+  return [...syncState(dir).pending];
 }
 
-export async function syncStatus() {
-  const dir = gitVaultDir();
-  if (!dir || !gitSyncEnabled()) return { enabled: false as const };
-  const s = syncState();
+export async function syncStatus(dir: string) {
+  const vaultDir = gitVaultDir(dir);
+  if (!vaultDir || !gitSyncEnabled()) return { enabled: false as const };
+  const s = syncState(dir);
   // Surfaced rather than hidden behind a generic error: when the breaker is open the dashboard's
   // "sync error" dot is telling the truth, but only this says the vault is fine and git is paused.
   const pausedMs = gitPausedFor();
   const paused = pausedMs > 0 ? { paused: Math.ceil(pausedMs / 1000) } : {};
   try {
-    const { st, stashed } = await gitRead(`status:${dir}`, STATUS_TTL_MS, async () => {
-      const g = vaultGit(dir);
+    const { st, stashed } = await gitRead(`status:${vaultDir}`, STATUS_TTL_MS, async () => {
+      const g = vaultGit(vaultDir);
       const st = await g.status();
       // Stash entries are reported because nothing in Engram creates one any more. Any that exist
       // are vault content the old `--autostash` pull stranded — recoverable with `git stash list`
@@ -332,20 +343,18 @@ export interface PullResult {
 }
 
 /**
- * Pull remote commits into the ACTIVE vault clone (rebase). This is how changes pushed to the repo
- * from OUTSIDE Engram (an agent, a teammate, a direct git push) show up — the index is rebuilt when
- * HEAD moves. Independent of the push side; a fresh connected workspace should always reflect its
- * remote. No-op for the sample/local vault.
+ * Pull remote commits into one workspace's clone (rebase). This is how changes pushed to the
+ * repo from OUTSIDE Engram (an agent, a teammate, a direct git push) show up — the index is
+ * rebuilt when HEAD moves. No-op for the sample/local vault (no `.git` of its own).
  *
  * Postpones itself rather than rebasing over uncommitted vault writes — see below.
  */
-export async function pullActive(): Promise<PullResult> {
-  const active = getActive();
-  if (!active) return { ok: true, changed: false };
+export async function pullWorkspace(dir: string): Promise<PullResult> {
   const result = await tryRunGit(async (): Promise<PullResult> => {
-    const dir = activeVaultDir();
+    const vaultDir = gitVaultDir(dir);
+    if (!vaultDir) return { ok: true, changed: false };
     try {
-      const g = vaultGit(dir);
+      const g = vaultGit(vaultDir);
 
       // Never rebase over uncommitted vault writes.
       //
@@ -363,7 +372,7 @@ export async function pullActive(): Promise<PullResult> {
       if (dirty) {
         if (gitSyncEnabled()) {
           // The write-sync commits, then pulls, then pushes. Let it own this cycle.
-          requestSync("pull deferred — uncommitted vault writes");
+          requestSync(vaultDir, "pull deferred — uncommitted vault writes");
           return { ok: true, changed: false, deferred: true };
         }
         return {
@@ -377,12 +386,12 @@ export async function pullActive(): Promise<PullResult> {
       await pullRebase(g, upstreamOf(status)); // pull already fetches — a separate g.fetch() only doubles the child processes
       const after = await g.revparse(["HEAD"]).catch(() => "");
       const changed = before !== after;
-      if (changed) rebuildIndex();
+      if (changed) rebuildIndex(vaultDir);
       return { ok: true, changed };
     } catch (e) {
       // Same reason as in syncOnce: a conflicted rebase left in place means the next `git add -A`
       // commits conflict markers into a note.
-      const aborted = await abortRebaseIfAny(dir, vaultGit(dir));
+      const aborted = await abortRebaseIfAny(vaultDir, vaultGit(vaultDir));
       console.error("[git] pull failed", e);
       return {
         ok: false,
@@ -405,20 +414,20 @@ export interface ActivityEntry {
 }
 
 /**
- * Recent commits to the active vault — the "who did what to the brain" feed (agents + humans;
+ * Recent commits to a workspace — the "who did what to the brain" feed (agents + humans;
  * git-sync commits look like `brain: N change(s) — …`), most-recent first. Read-only. Empty
- * unless the vault is its own git repo (see gitVaultDir), so we never surface Engram's own
+ * unless the workspace is its own git repo (see gitVaultDir), so we never surface Engram's own
  * history via the sample vault.
  *
  * `scopePath` limits this to commits that touched files under that vault-relative folder (git's
  * own path-scoped log) — used by the folder-browser view's "Recent activity" section.
  */
-export async function vaultActivity(maxCount = 50, scopePath?: string): Promise<ActivityEntry[]> {
-  const dir = gitVaultDir();
-  if (!dir) return [];
+export async function vaultActivity(dir: string, maxCount = 50, scopePath?: string): Promise<ActivityEntry[]> {
+  const vaultDir = gitVaultDir(dir);
+  if (!vaultDir) return [];
   try {
-    const log = await gitRead(`activity:${dir}:${maxCount}:${scopePath ?? ""}`, ACTIVITY_TTL_MS, () =>
-      vaultGit(dir).log(scopePath ? { maxCount, file: scopePath } : { maxCount }),
+    const log = await gitRead(`activity:${vaultDir}:${maxCount}:${scopePath ?? ""}`, ACTIVITY_TTL_MS, () =>
+      vaultGit(vaultDir).log(scopePath ? { maxCount, file: scopePath } : { maxCount }),
     );
     return log.all.map((c) => ({
       hash: c.hash.slice(0, 7),
@@ -496,17 +505,17 @@ function splitDiffByFile(diff: string): Map<string, string> {
 
 /**
  * What a single commit changed: metadata + each touched file with its own patch, add/del counts,
- * and status. Guarded like the rest — only the active vault, only a valid hash. Null if unavailable.
+ * and status. Guarded like the rest — only the given workspace, only a valid hash. Null if unavailable.
  */
-export async function commitChanges(hash: string): Promise<CommitDetail | null> {
-  const dir = gitVaultDir();
-  if (!dir) return null;
+export async function commitChanges(dir: string, hash: string): Promise<CommitDetail | null> {
+  const vaultDir = gitVaultDir(dir);
+  if (!vaultDir) return null;
   if (!/^[0-9a-f]{4,40}$/i.test(hash)) return null; // avoid passing arbitrary args to git
   try {
     // All three `show`s in one queue slot: they describe a single commit, so interleaving another
     // caller's pull between them would be three git children racing a rebase for no benefit.
     const { meta, nameStatus, rawDiff } = await runGit(async () => {
-      const g = vaultGit(dir);
+      const g = vaultGit(vaultDir);
       return {
         meta: await g.raw(["show", "-s", "--no-color", "--format=%h%x1f%an%x1f%aI%x1f%s", hash]),
         nameStatus: await g.raw(["show", "--no-color", "--format=", "--name-status", hash]),
@@ -535,24 +544,29 @@ export async function commitChanges(hash: string): Promise<CommitDetail | null> 
 }
 
 /**
- * Poll the remote for the active vault so the brain stays fresh without a redeploy. Self-reschedules
- * instead of using setInterval: the next tick is queued only after the current pull settles, so a
- * slow pull can never overlap the next one. On failure it backs off exponentially (30s healthy →
- * capped ~16min) so a network/DNS blip can't become a tight retry loop that spawns git processes
- * faster than they exit — the pile-up that aborted the process.
+ * Poll the remote for EVERY connected workspace, so any of them stays fresh without a redeploy
+ * — any workspace might be someone's current dashboard/token target at any time, not just one
+ * global "active" one. Self-reschedules instead of using setInterval: the next tick is queued
+ * only after the current sweep settles. Each workspace's pull still goes through the one shared
+ * git queue (lib/git-queue.ts), so this loop's iterations serialize naturally.
  *
- * The timer and the failure count live in the shared state, so the loop stays single even though
- * this module exists three times over in the server build.
+ * Whether the loop has started lives on `globalThis` for the same "module compiled into several
+ * chunks" reason as syncState.
  */
 export function startPullLoop(baseMs = 30_000): void {
-  const s = syncState();
-  if (s.pullTimer) return;
+  const g = globalThis as GlobalWithLoop;
+  if (g[PULL_LOOP_KEY]) return;
+  g[PULL_LOOP_KEY] = true;
   const tick = async () => {
-    const res = await pullActive().catch(() => ({ ok: false as const }));
-    s.pullFailures = res.ok ? 0 : Math.min(s.pullFailures + 1, 5);
-    s.pullTimer = setTimeout(tick, baseMs * 2 ** s.pullFailures);
-    s.pullTimer.unref?.();
+    for (const repo of listRepos()) {
+      const dir = vaultDirFor(repo.id);
+      const s = syncState(dir);
+      const res = await pullWorkspace(dir).catch(() => ({ ok: false as const, changed: false }));
+      s.pullFailures = res.ok ? 0 : Math.min(s.pullFailures + 1, 5);
+    }
+    const t = setTimeout(tick, baseMs);
+    t.unref?.();
   };
-  s.pullTimer = setTimeout(tick, baseMs);
-  s.pullTimer.unref?.();
+  const t = setTimeout(tick, baseMs);
+  t.unref?.();
 }

@@ -25,6 +25,13 @@ interface StoredToken {
   created: string;
   /** Absent on tokens created before scopes existed — those are grandfathered as `write`. */
   scope?: TokenScope;
+  /**
+   * The workspace this token is pinned to. Absent on tokens created before workspace
+   * permissions existed — those are resolved to the legacy global default workspace by
+   * lib/workspace-resolve.ts and shown as "unscoped — legacy" in the UI, so nothing that
+   * already worked silently breaks.
+   */
+  workspaceId?: string;
 }
 
 export interface TokenMeta {
@@ -32,6 +39,7 @@ export interface TokenMeta {
   name: string;
   created: string;
   scope: TokenScope;
+  workspaceId?: string;
 }
 
 const hash = (t: string) => crypto.createHash("sha256").update(t).digest("hex");
@@ -57,11 +65,15 @@ function save(tokens: StoredToken[]) {
 const scopeOf = (t: StoredToken): TokenScope => t.scope ?? "write";
 
 export function listTokens(): TokenMeta[] {
-  return load().map((t) => ({ id: t.id, name: t.name, created: t.created, scope: scopeOf(t) }));
+  return load().map((t) => ({ id: t.id, name: t.name, created: t.created, scope: scopeOf(t), workspaceId: t.workspaceId }));
 }
 
 /** Create a token. Returns the plaintext value ONCE — only the hash is stored. */
-export function createToken(name: string, scope: TokenScope = "write"): { id: string; name: string; scope: TokenScope; token: string } {
+export function createToken(
+  name: string,
+  scope: TokenScope = "write",
+  workspaceId?: string,
+): { id: string; name: string; scope: TokenScope; workspaceId?: string; token: string } {
   const token = crypto.randomBytes(32).toString("hex");
   const rec: StoredToken = {
     id: crypto.randomUUID(),
@@ -69,11 +81,12 @@ export function createToken(name: string, scope: TokenScope = "write"): { id: st
     hash: hash(token),
     created: new Date().toISOString(),
     scope: scope === "read" ? "read" : "write",
+    workspaceId: workspaceId || undefined,
   };
   const all = load();
   all.push(rec);
   save(all);
-  return { id: rec.id, name: rec.name, scope: rec.scope!, token };
+  return { id: rec.id, name: rec.name, scope: rec.scope!, workspaceId: rec.workspaceId, token };
 }
 
 export function revokeToken(id: string): void {
@@ -85,7 +98,7 @@ export function resolveToken(bearer: string): TokenMeta | null {
   if (!bearer) return null;
   const h = hash(bearer);
   const t = load().find((x) => x.hash === h);
-  return t ? { id: t.id, name: t.name, created: t.created, scope: scopeOf(t) } : null;
+  return t ? { id: t.id, name: t.name, created: t.created, scope: scopeOf(t), workspaceId: t.workspaceId } : null;
 }
 
 export function hasAnyToken(): boolean {

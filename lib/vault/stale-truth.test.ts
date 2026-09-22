@@ -99,12 +99,12 @@ beforeAll(async () => {
   store = await import("./store");
   writeMod = await import("./write");
   conflict = await import("./conflict");
-  store.rebuildIndex();
+  store.rebuildIndex(vault);
 });
 
 describe("search withholds facts that are no longer true", () => {
   test("a superseded note is withheld even though it matches the query better", () => {
-    const r = store.searchNotes("acme price pricing");
+    const r = store.searchNotes(vault, "acme price pricing");
     const hitPaths = r.hits.map((h) => h.path);
 
     expect(hitPaths).toContain("pricing/acme-pricing-live.md");
@@ -116,12 +116,12 @@ describe("search withholds facts that are no longer true", () => {
   });
 
   test("the exclusion is explainable — every withheld note carries a reason", () => {
-    const r = store.searchNotes("acme price pricing");
+    const r = store.searchNotes(vault, "acme price pricing");
     for (const e of r.excluded) expect(e.reason.length).toBeGreaterThan(0);
   });
 
   test("an expired note is withheld and the reason names the date", () => {
-    const r = store.searchNotes("beta discount terms");
+    const r = store.searchNotes(vault, "beta discount terms");
     expect(r.hits.map((h) => h.path)).not.toContain("pricing/beta-terms.md");
     const ex = r.excluded.find((e) => e.path === "pricing/beta-terms.md");
     expect(ex).toBeDefined();
@@ -130,24 +130,24 @@ describe("search withholds facts that are no longer true", () => {
   });
 
   test("an unexpired note with the same shape is NOT withheld", () => {
-    const r = store.searchNotes("gamma discount terms");
+    const r = store.searchNotes(vault, "gamma discount terms");
     expect(r.hits.map((h) => h.path)).toContain("pricing/gamma-terms.md");
   });
 
   test("an archived note is withheld and reported as archived", () => {
-    const r = store.searchNotes("legacy price");
+    const r = store.searchNotes(vault, "legacy price");
     expect(r.hits.map((h) => h.path)).not.toContain("archive/legacy-pricing.md");
     const ex = r.excluded.find((e) => e.path === "archive/legacy-pricing.md");
     expect(ex?.authority).toBe("archived");
   });
 
   test("withheld notes are recoverable on request, not hidden", () => {
-    const r = store.searchNotes("acme price pricing", { includeInvalid: true });
+    const r = store.searchNotes(vault, "acme price pricing", { includeInvalid: true });
     expect(r.hits.map((h) => h.path)).toContain("pricing/acme-pricing.md");
   });
 
   test("a retired note never outranks its live replacement when both are requested", () => {
-    const r = store.searchNotes("acme price pricing", { includeInvalid: true });
+    const r = store.searchNotes(vault, "acme price pricing", { includeInvalid: true });
     const live = r.hits.findIndex((h) => h.path === "pricing/acme-pricing-live.md");
     const dead = r.hits.findIndex((h) => h.path === "pricing/acme-pricing.md");
     expect(live).toBeGreaterThanOrEqual(0);
@@ -157,40 +157,40 @@ describe("search withholds facts that are no longer true", () => {
 
 describe("guardConflict refuses a second live note on one subject", () => {
   test("a dated sibling of a live note is refused, and the error names brain_supersede", () => {
-    expect(() => conflict.guardConflict("pricing/widget-pricing-2026-07.md", true, false)).toThrow(
+    expect(() => conflict.guardConflict(vault, "pricing/widget-pricing-2026-07.md", true, false)).toThrow(
       /brain_supersede/,
     );
   });
 
   test("the refusal names the note it collides with", () => {
-    expect(() => conflict.guardConflict("pricing/widget-pricing-new.md", true, false)).toThrow(
+    expect(() => conflict.guardConflict(vault, "pricing/widget-pricing-new.md", true, false)).toThrow(
       /widget-pricing\.md/,
     );
   });
 
   test("allow_conflict is a real escape hatch", () => {
-    expect(() => conflict.guardConflict("pricing/widget-pricing-2026-07.md", true, true)).not.toThrow();
+    expect(() => conflict.guardConflict(vault, "pricing/widget-pricing-2026-07.md", true, true)).not.toThrow();
   });
 
   test("overwriting an existing note is not a conflict — that is guardTruncation's job", () => {
-    expect(() => conflict.guardConflict("pricing/widget-pricing-2026-07.md", false, false)).not.toThrow();
+    expect(() => conflict.guardConflict(vault, "pricing/widget-pricing-2026-07.md", false, false)).not.toThrow();
   });
 
   test("a genuinely distinct note is allowed — the guard must not cry wolf", () => {
     // A region-specific note is a real distinction, not the duplicate-price bug.
-    expect(() => conflict.guardConflict("pricing/widget-pricing-uk.md", true, false)).not.toThrow();
-    expect(() => conflict.guardConflict("pricing/gadget-pricing.md", true, false)).not.toThrow();
-    expect(() => conflict.guardConflict("pricing/widget-warranty.md", true, false)).not.toThrow();
+    expect(() => conflict.guardConflict(vault, "pricing/widget-pricing-uk.md", true, false)).not.toThrow();
+    expect(() => conflict.guardConflict(vault, "pricing/gadget-pricing.md", true, false)).not.toThrow();
+    expect(() => conflict.guardConflict(vault, "pricing/widget-warranty.md", true, false)).not.toThrow();
   });
 
   test("a retired note is not a conflict — a replacement is supposed to sit next to it", () => {
     // acme-pricing.md is superseded, so writing a fresh acme-pricing-2026 must not be blocked by it.
-    expect(() => conflict.guardConflict("pricing/acme-pricing-2026.md", true, false)).not.toThrow();
+    expect(() => conflict.guardConflict(vault, "pricing/acme-pricing-2026.md", true, false)).not.toThrow();
   });
 
   test("findConflicts only reports live notes", () => {
-    expect(conflict.findConflicts("pricing/acme-pricing-2026.md")).toHaveLength(0);
-    const live = conflict.findConflicts("pricing/widget-pricing-2026.md");
+    expect(conflict.findConflicts(vault, "pricing/acme-pricing-2026.md")).toHaveLength(0);
+    const live = conflict.findConflicts(vault, "pricing/widget-pricing-2026.md");
     expect(live.map((c) => c.path)).toEqual(["pricing/widget-pricing.md"]);
   });
 });
@@ -210,7 +210,7 @@ describe("subjectTokens", () => {
 
 describe("supersedeNote is atomic", () => {
   test("retires the old note in place and creates the replacement in one operation", async () => {
-    await writeMod.supersedeNote(
+    await writeMod.supersedeNote(vault, 
       "pricing/widget-pricing.md",
       "pricing/widget-pricing-2027.md",
       "repriced for 2027",
@@ -228,8 +228,8 @@ describe("supersedeNote is atomic", () => {
   });
 
   test("after superseding, search withholds the old note and returns the new one", () => {
-    store.rebuildIndex();
-    const r = store.searchNotes("widget price");
+    store.rebuildIndex(vault);
+    const r = store.searchNotes(vault, "widget price");
     expect(r.hits.map((h) => h.path)).toContain("pricing/widget-pricing-2027.md");
     expect(r.hits.map((h) => h.path)).not.toContain("pricing/widget-pricing.md");
     const ex = r.excluded.find((e) => e.path === "pricing/widget-pricing.md");
@@ -237,10 +237,10 @@ describe("supersedeNote is atomic", () => {
   });
 
   test("refuses to supersede a note into itself", () => {
-    expect(writeMod.supersedeNote("pricing/a.md", "pricing/a.md")).rejects.toThrow();
+    expect(writeMod.supersedeNote(vault, "pricing/a.md", "pricing/a.md")).rejects.toThrow();
   });
 
   test("refuses to supersede a note that does not exist", () => {
-    expect(writeMod.supersedeNote("pricing/nope.md", "pricing/other.md")).rejects.toThrow(/does not exist/);
+    expect(writeMod.supersedeNote(vault, "pricing/nope.md", "pricing/other.md")).rejects.toThrow(/does not exist/);
   });
 });

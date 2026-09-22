@@ -110,7 +110,7 @@ async function secondWriterPushes(line: string) {
 }
 
 let appendNote: typeof import("./vault/write").appendNote;
-let pullActive: typeof import("./git").pullActive;
+let pullWorkspace: typeof import("./git").pullWorkspace;
 let syncNow: typeof import("./git").syncNow;
 let pendingReasons: typeof import("./git").pendingReasons;
 let requestSync: typeof import("./git").requestSync;
@@ -122,7 +122,7 @@ beforeAll(async () => {
   // test/setup.ts pins GIT_SYNC_ENABLED=false for every other suite; this one needs it on.
   const settings = await import("./settings");
   settings.updateSettings({ gitSyncEnabled: true, gitAuthorName: "Engram", gitAuthorEmail: "engram@test" });
-  ({ pullActive, syncNow, pendingReasons, requestSync, syncStatus } = await import("./git"));
+  ({ pullWorkspace, syncNow, pendingReasons, requestSync, syncStatus } = await import("./git"));
   ({ appendNote } = await import("./vault/write"));
   ({ rebuildIndex } = await import("./vault/store"));
 });
@@ -135,23 +135,23 @@ afterAll(async () => {
 
 describe("the sync queue drains", () => {
   test("a completed sync does not re-queue its reasons", async () => {
-    requestSync("Agent Yang: append delivery.md");
-    expect(pendingReasons().length).toBe(1);
+    requestSync(VAULT, "Agent Yang: append delivery.md");
+    expect(pendingReasons(VAULT).length).toBe(1);
 
     fs.appendFileSync(path.join(VAULT, NOTE), "- **2026-08-06** — first entry.\n");
-    const out = await syncNow();
+    const out = await syncNow(VAULT);
 
     expect(out?.committed).toBe(true);
     // The bug: `pending` still held the reason, so the next commit repeated it.
-    expect(pendingReasons()).toEqual([]);
+    expect(pendingReasons(VAULT)).toEqual([]);
   });
 
   test("consecutive syncs do not accumulate each other's reasons in the commit subject", async () => {
     const subjects: string[] = [];
     for (const entry of ["second", "third", "fourth"]) {
       fs.appendFileSync(path.join(VAULT, NOTE), `- **2026-08-06** — ${entry} entry.\n`);
-      requestSync(`Agent Yang: append ${entry}`);
-      await syncNow();
+      requestSync(VAULT, `Agent Yang: append ${entry}`);
+      await syncNow(VAULT);
       subjects.push((await vaultGit().log({ maxCount: 1 })).latest!.message);
     }
     // Production showed "1 change(s)" → "2" → "3": every subject restating all earlier reasons.
@@ -163,13 +163,13 @@ describe("the sync queue drains", () => {
 
 describe("a pull never rebases over uncommitted vault writes", () => {
   test("an uncommitted append survives a concurrent pull, with a second writer on the same note", async () => {
-    await syncNow(); // start from a clean tree
+    await syncNow(VAULT); // start from a clean tree
     await secondWriterPushes("- **2026-08-05** — line from the other writer.");
 
     const entry = "- **2026-08-06** — MARKER Bitwarden collection created.";
-    await appendNote(NOTE, entry); // on disk, not yet committed (2.5s debounce)
+    await appendNote(VAULT, NOTE, entry); // on disk, not yet committed (2.5s debounce)
 
-    const res = await pullActive();
+    const res = await pullWorkspace(VAULT);
 
     expect(res.ok).toBe(true);
     // The append must still be on disk, whatever the pull decided to do.
@@ -182,7 +182,7 @@ describe("a pull never rebases over uncommitted vault writes", () => {
 
   test("a conflicting second writer never corrupts the note or strands the repo mid-rebase", async () => {
     const entry = "- **2026-08-06** — MARKER Bitwarden collection created.";
-    const out = await syncNow();
+    const out = await syncNow(VAULT);
 
     // Both writers appended to the end of the same note, so the rebase conflicts. What matters is
     // that our content survives, the note is clean, and the repo is left usable.
@@ -202,7 +202,7 @@ describe("a pull never rebases over uncommitted vault writes", () => {
     // And the divergence is reported rather than swallowed.
     expect(out?.conflicted).toBe(true);
     expect(out?.error).toMatch(/diverged/);
-    const s = (await syncStatus()) as { lastError?: string };
+    const s = (await syncStatus(VAULT)) as { lastError?: string };
     expect(s.lastError).toMatch(/diverged/);
   });
 
@@ -217,7 +217,7 @@ describe("a pull never rebases over uncommitted vault writes", () => {
     const g = vaultGit();
     await g.raw(["fetch", "origin"]);
     await g.raw(["reset", "--hard", `origin/${BRANCH}`]);
-    rebuildIndex();
+    rebuildIndex(VAULT);
 
     const seed = simpleGit(SEED);
     await seed.raw(["pull", "--rebase", "origin", BRANCH]);
@@ -227,8 +227,8 @@ describe("a pull never rebases over uncommitted vault writes", () => {
     await seed.push(["origin", `HEAD:refs/heads/${BRANCH}`]);
 
     const ours = "- **2026-08-06** — ours, on a different line.";
-    await appendNote(NOTE, ours);
-    const out = await syncNow();
+    await appendNote(VAULT, NOTE, ours);
+    const out = await syncNow(VAULT);
 
     expect(out?.conflicted).toBeFalsy();
     expect(out?.pushed).toBe(true);
@@ -239,10 +239,10 @@ describe("a pull never rebases over uncommitted vault writes", () => {
   test("repeated append-then-pull cycles lose nothing", async () => {
     for (let i = 0; i < 5; i++) {
       const entry = `- **2026-08-06** — cycle-${i} entry.`;
-      await appendNote(NOTE, entry);
-      await pullActive();
+      await appendNote(VAULT, NOTE, entry);
+      await pullWorkspace(VAULT);
       expect(onDisk()).toContain(entry);
-      await syncNow();
+      await syncNow(VAULT);
       expect(onDisk()).toContain(entry);
     }
     const body = onDisk();
@@ -262,17 +262,20 @@ describe("one writer, across every copy of this module", () => {
    * on globalThis is what makes the three copies one writer.
    */
   test("the debounce queue is shared process state, not module state", async () => {
-    requestSync("Agent Yang: append delivery.md");
-    const shared = (globalThis as Record<symbol, { pending: string[] } | undefined>)[Symbol.for("engram.git.sync")];
-    expect(shared?.pending).toContain("Agent Yang: append delivery.md");
-    expect(pendingReasons()).toEqual(shared!.pending);
-    await syncNow(); // drain, so the 2.5s timer can't fire into a later test
-    expect(pendingReasons()).toEqual([]);
+    requestSync(VAULT, "Agent Yang: append delivery.md");
+    // One SyncState per workspace dir now (a Map, not a single object) — different workspaces
+    // must not share a debounce queue or pending-reasons list.
+    const shared = (globalThis as Record<symbol, Map<string, { pending: string[] }> | undefined>)[Symbol.for("engram.git.sync")];
+    const state = shared?.get(VAULT);
+    expect(state?.pending).toContain("Agent Yang: append delivery.md");
+    expect(pendingReasons(VAULT)).toEqual(state!.pending);
+    await syncNow(VAULT); // drain, so the 2.5s timer can't fire into a later test
+    expect(pendingReasons(VAULT)).toEqual([]);
   });
 
   test("overlapping pulls and syncs never race into 'Cannot rebase onto multiple branches'", async () => {
     fs.appendFileSync(path.join(VAULT, NOTE), "- **2026-08-07** — concurrent-callers entry.\n");
-    const results = await Promise.all([pullActive(), syncNow(), pullActive(), syncNow(), pullActive()]);
+    const results = await Promise.all([pullWorkspace(VAULT), syncNow(VAULT), pullWorkspace(VAULT), syncNow(VAULT), pullWorkspace(VAULT)]);
 
     for (const r of results) {
       expect(r?.error ?? "").not.toMatch(/multiple branches/);
@@ -288,12 +291,12 @@ describe("one writer, across every copy of this module", () => {
 
 describe("sync failures are reportable, not just console noise", () => {
   test("syncStatus surfaces a stranded stash so old autostash losses can be recovered", async () => {
-    await syncNow();
+    await syncNow(VAULT);
     // Simulate what the old --autostash pull left behind: vault content parked in a stash.
     fs.appendFileSync(path.join(VAULT, NOTE), "- stranded content\n");
     await vaultGit().stash(["push", "-m", "autostash"]);
 
-    const s = (await syncStatus()) as { enabled: boolean; stashed?: number };
+    const s = (await syncStatus(VAULT)) as { enabled: boolean; stashed?: number };
     expect(s.enabled).toBe(true);
     expect(s.stashed).toBe(1);
 

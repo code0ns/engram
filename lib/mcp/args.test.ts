@@ -53,7 +53,7 @@ describe("brain_append — the incident", () => {
     seed(NOTE, BODY);
     // Exactly what production received: `content` (brain_write's parameter) instead of `text`.
     await expect(
-      callTool("brain_append", { path: NOTE, content: "- **2026-08-06** — Bitwarden collection created." }),
+      callTool("brain_append", { path: NOTE, content: "- **2026-08-06** — Bitwarden collection created." }, { dir: vault }),
     ).rejects.toThrow(/text/);
     // and the note is untouched — no stray blank line
     expect(read(NOTE)).toBe(BODY);
@@ -61,7 +61,7 @@ describe("brain_append — the incident", () => {
 
   test("the refusal names the parameter the caller should have used", async () => {
     seed(NOTE, BODY);
-    const err = await callTool("brain_append", { path: NOTE, content: "x" }).catch((e: Error) => e);
+    const err = await callTool("brain_append", { path: NOTE, content: "x" }, { dir: vault }).catch((e: Error) => e);
     expect((err as Error).message).toContain("brain_append");
     expect((err as Error).message).toContain("text");
     expect((err as Error).message).toContain("content");
@@ -70,21 +70,21 @@ describe("brain_append — the incident", () => {
   test("an empty or whitespace-only append is refused", async () => {
     seed(NOTE, BODY);
     for (const text of ["", "   ", "\n\n"]) {
-      await expect(callTool("brain_append", { path: NOTE, text })).rejects.toThrow(/[Nn]othing to append/);
+      await expect(callTool("brain_append", { path: NOTE, text }, { dir: vault })).rejects.toThrow(/[Nn]othing to append/);
     }
     expect(read(NOTE)).toBe(BODY);
   });
 
   test("a missing `text` is refused rather than appending a blank line", async () => {
     seed(NOTE, BODY);
-    await expect(callTool("brain_append", { path: NOTE })).rejects.toThrow();
+    await expect(callTool("brain_append", { path: NOTE }, { dir: vault })).rejects.toThrow();
     expect(read(NOTE)).toBe(BODY);
   });
 
   test("a well-formed append still works, and the text is on disk", async () => {
     seed(NOTE, BODY);
     const entry = "- **2026-08-06** — Bitwarden collection created for Kolumbi.";
-    const res = (await callTool("brain_append", { path: NOTE, text: entry })) as { ok: boolean; path: string };
+    const res = (await callTool("brain_append", { path: NOTE, text: entry }, { dir: vault })) as { ok: boolean; path: string };
     expect(res.ok).toBe(true);
     expect(read(NOTE)).toContain(entry);
     expect(read(NOTE).startsWith(BODY)).toBe(true);
@@ -93,7 +93,7 @@ describe("brain_append — the incident", () => {
   test("consecutive appends all survive", async () => {
     seed(NOTE, BODY);
     for (const n of ["ONE", "TWO", "THREE"]) {
-      await callTool("brain_append", { path: NOTE, text: `- entry ${n}` });
+      await callTool("brain_append", { path: NOTE, text: `- entry ${n}` }, { dir: vault });
     }
     const out = read(NOTE);
     for (const n of ["ONE", "TWO", "THREE"]) expect(out).toContain(`- entry ${n}`);
@@ -103,20 +103,20 @@ describe("brain_append — the incident", () => {
 describe("argument validation covers every tool", () => {
   test("an unknown argument is refused everywhere, not coerced", async () => {
     seed(NOTE, BODY);
-    await expect(callTool("brain_read", { path: NOTE, sekshun: "Log" })).rejects.toThrow(/sekshun/);
+    await expect(callTool("brain_read", { path: NOTE, sekshun: "Log" }, { dir: vault })).rejects.toThrow(/sekshun/);
   });
 
   test("a missing required argument is refused before the handler runs", async () => {
     // brain_move without `to` used to rename the note to `undefined.md` and report ok.
     seed(NOTE, BODY);
-    await expect(callTool("brain_move", { from: NOTE })).rejects.toThrow(/to/);
+    await expect(callTool("brain_move", { from: NOTE }, { dir: vault })).rejects.toThrow(/to/);
     expect(exists(NOTE)).toBe(true);
     expect(exists("undefined.md")).toBe(false);
   });
 
   test("brain_supersede cannot retire a note into `undefined.md`", async () => {
     seed(NOTE, BODY);
-    await expect(callTool("brain_supersede", { from: NOTE })).rejects.toThrow(/to/);
+    await expect(callTool("brain_supersede", { from: NOTE }, { dir: vault })).rejects.toThrow(/to/);
     expect(read(NOTE)).toBe(BODY);
     expect(exists("undefined.md")).toBe(false);
   });
@@ -126,14 +126,14 @@ describe("argument validation covers every tool", () => {
     // "brain: 1 change(s) — edit undefined.md", a real 38-line decision note filed at the vault
     // root because `String(undefined)` is "undefined". It was spotted and moved 90 seconds later;
     // nothing but luck made it visible.
-    await expect(callTool("brain_write", { body: "---\ntitle: Decision\n---\nreal content" })).rejects.toThrow(/path/);
-    await expect(callTool("brain_edit", { content: "---\ntitle: Decision\n---\nreal content" })).rejects.toThrow(/path/);
+    await expect(callTool("brain_write", { body: "---\ntitle: Decision\n---\nreal content" }, { dir: vault })).rejects.toThrow(/path/);
+    await expect(callTool("brain_edit", { content: "---\ntitle: Decision\n---\nreal content" }, { dir: vault })).rejects.toThrow(/path/);
     expect(exists("undefined.md")).toBe(false);
   });
 
   test("a wrongly-typed argument is refused rather than stringified", async () => {
     seed(NOTE, BODY);
-    await expect(callTool("brain_append", { path: NOTE, text: { md: "hi" } })).rejects.toThrow(/string/);
+    await expect(callTool("brain_append", { path: NOTE, text: { md: "hi" } }, { dir: vault })).rejects.toThrow(/string/);
     expect(read(NOTE)).toBe(BODY);
   });
 
@@ -152,14 +152,14 @@ describe("the write tools refuse an empty payload consistently", () => {
   // brain_write/brain_edit already refused; brain_append did not. That inconsistency IS the bug —
   // a client that says `content` everywhere got an error from one tool and silence from the other.
   test("brain_write refuses an empty note", async () => {
-    await expect(callTool("brain_write", { path: "scratch/empty.md" })).rejects.toThrow(/[Nn]othing to write/);
+    await expect(callTool("brain_write", { path: "scratch/empty.md" }, { dir: vault })).rejects.toThrow(/[Nn]othing to write/);
     expect(exists("scratch/empty.md")).toBe(false);
   });
 
   test("brain_edit refuses an empty overwrite", async () => {
     // A fresh path, so the empty-payload guard is what fires rather than read-before-overwrite
     // (which correctly refuses first on an existing note — see the guardOverwrite tests).
-    await expect(callTool("brain_edit", { path: "clients/kolumbi/fresh.md", body: "   " })).rejects.toThrow(
+    await expect(callTool("brain_edit", { path: "clients/kolumbi/fresh.md", body: "   " }, { dir: vault })).rejects.toThrow(
       /[Nn]othing to write/,
     );
     expect(exists("clients/kolumbi/fresh.md")).toBe(false);
@@ -175,7 +175,7 @@ describe("the write tools refuse an empty payload consistently", () => {
       ["brain_edit", { path: NOTE, content: "" }],
     ];
     for (const [name, args] of attempts) {
-      const res = await callTool(name, args).catch((e: Error) => e);
+      const res = await callTool(name, args, { dir: vault }).catch((e: Error) => e);
       expect(res).toBeInstanceOf(Error);
     }
     expect(read(NOTE)).toBe(before);

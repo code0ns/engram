@@ -38,14 +38,22 @@ interface TokenMeta {
   name: string;
   created: string;
   scope: TokenScope;
+  workspaceId?: string;
+}
+interface Repo {
+  id: string;
+  name: string;
 }
 
-/** The name + scope + create controls, shared by the inline (desktop) and dialog (mobile) forms. */
+/** The name + scope + workspace + create controls, shared by the inline (desktop) and dialog (mobile) forms. */
 function TokenFields({
   newName,
   setNewName,
   scope,
   setScope,
+  repos,
+  workspaceId,
+  setWorkspaceId,
   creating,
   onCreate,
   className,
@@ -54,48 +62,65 @@ function TokenFields({
   setNewName: (v: string) => void;
   scope: TokenScope;
   setScope: (s: TokenScope) => void;
+  repos: Repo[];
+  workspaceId: string;
+  setWorkspaceId: (id: string) => void;
   creating: boolean;
   onCreate: () => void;
   className?: string;
 }) {
   return (
-    <div className={cn("flex flex-col gap-2 sm:flex-row sm:items-center", className)}>
-      <input
-        value={newName}
-        onChange={(e) => setNewName(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && onCreate()}
-        placeholder="Token name"
-        className="min-w-0 flex-1 rounded-md border border-border bg-background px-2.5 py-1.5 text-sm outline-none placeholder:text-muted-foreground sm:w-56 sm:flex-none"
-      />
-      <div className="flex items-center gap-2">
-        <div className="inline-flex shrink-0 rounded-md border border-border p-0.5" role="group" aria-label="Token scope">
-          {(["read", "write"] as const).map((sc) => (
-            <button
-              key={sc}
-              type="button"
-              onClick={() => setScope(sc)}
-              title={
-                sc === "read"
-                  ? "The agent can search and read your notes, but cannot change them."
-                  : "The agent can create, edit, move and delete notes."
-              }
-              className={cn(
-                "rounded px-3 py-1.5 text-xs font-medium capitalize transition-colors",
-                scope === sc ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground",
-              )}
-            >
-              {sc}
-            </button>
-          ))}
+    <div className={cn("flex flex-col gap-2", className)}>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+        <input
+          value={newName}
+          onChange={(e) => setNewName(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && onCreate()}
+          placeholder="Token name"
+          className="min-w-0 flex-1 rounded-md border border-border bg-background px-2.5 py-1.5 text-sm outline-none placeholder:text-muted-foreground sm:w-56 sm:flex-none"
+        />
+        <div className="flex items-center gap-2">
+          <div className="inline-flex shrink-0 rounded-md border border-border p-0.5" role="group" aria-label="Token scope">
+            {(["read", "write"] as const).map((sc) => (
+              <button
+                key={sc}
+                type="button"
+                onClick={() => setScope(sc)}
+                title={
+                  sc === "read"
+                    ? "The agent can search and read your notes, but cannot change them."
+                    : "The agent can create, edit, move and delete notes."
+                }
+                className={cn(
+                  "rounded px-3 py-1.5 text-xs font-medium capitalize transition-colors",
+                  scope === sc ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {sc}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={onCreate}
+            disabled={creating}
+            className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50"
+          >
+            {creating ? "Creating…" : "Create"}
+          </button>
         </div>
-        <button
-          onClick={onCreate}
-          disabled={creating}
-          className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50"
-        >
-          {creating ? "Creating…" : "Create"}
-        </button>
       </div>
+      {repos.length > 0 && (
+        <Select value={workspaceId} onValueChange={setWorkspaceId}>
+          <SelectTrigger className="w-full sm:w-56">
+            <SelectValue placeholder="Workspace" />
+          </SelectTrigger>
+          <SelectContent>
+            {repos.map((r) => (
+              <SelectItem key={r.id} value={r.id}>{r.name}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      )}
     </div>
   );
 }
@@ -103,16 +128,25 @@ function TokenFields({
 export default function ConnectPage() {
   const [origin, setOrigin] = useState("");
   useEffect(() => setOrigin(window.location.origin), []);
+
   const { data: feat } = useSWR<{ mcpAuthRequired?: boolean; harness?: boolean }>("/api/features", fetcher);
   const { data: tokData } = useSWR<{ tokens: TokenMeta[] }>("/api/tokens", fetcher);
+  const { data: reposData } = useSWR<{ repos: Repo[] }>("/api/repos", fetcher);
   const { mutate } = useSWRConfig();
 
+  const repos = reposData?.repos ?? [];
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
   const [justCreated, setJustCreated] = useState<{ name: string; token: string } | null>(null);
   const [scope, setScope] = useState<TokenScope>("write");
+  const [workspaceId, setWorkspaceId] = useState("");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [agent, setAgent] = useState("claude-code");
+
+  useEffect(() => {
+    if (repos.length > 0 && !workspaceId) setWorkspaceId(repos[0].id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repos]);
 
   const mcp = origin ? `${origin}/api/mcp` : "…";
   const needsToken = feat?.mcpAuthRequired !== false;
@@ -149,7 +183,7 @@ export default function ConnectPage() {
       const res = await fetch("/api/tokens", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: newName.trim() || "token", scope }),
+        body: JSON.stringify({ name: newName.trim() || "token", scope, workspaceId: workspaceId || undefined }),
       });
       const d = await res.json();
       if (d.token) setJustCreated({ name: d.name, token: d.token });
@@ -169,7 +203,8 @@ export default function ConnectPage() {
   }
 
   const tokens = tokData?.tokens ?? [];
-  const fieldProps = { newName, setNewName, scope, setScope, creating, onCreate: create };
+  const repoName = (id?: string) => (id ? repos.find((r) => r.id === id)?.name : undefined);
+  const fieldProps = { newName, setNewName, scope, setScope, repos, workspaceId, setWorkspaceId, creating, onCreate: create };
 
   return (
     <div className="scrollbar-none h-full overflow-y-auto">
@@ -224,6 +259,7 @@ export default function ConnectPage() {
                   <tr className="border-b border-border text-left text-xs text-muted-foreground">
                     <th className="px-3 py-2 font-medium">Name</th>
                     <th className="px-3 py-2 font-medium">Scope</th>
+                    <th className="hidden px-3 py-2 font-medium sm:table-cell">Workspace</th>
                     <th className="hidden px-3 py-2 font-medium sm:table-cell">Created</th>
                     <th className="px-3 py-2 text-right font-medium">Revoke</th>
                   </tr>
@@ -236,6 +272,13 @@ export default function ConnectPage() {
                         <span className={cn("text-xs", t.scope === "read" ? "text-muted-foreground" : "text-foreground")}>
                           {t.scope === "read" ? "read-only" : "read & write"}
                         </span>
+                      </td>
+                      <td className="hidden px-3 py-2 sm:table-cell">
+                        {t.workspaceId ? (
+                          <span className="text-xs">{repoName(t.workspaceId) ?? "(deleted)"}</span>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">unscoped — legacy</span>
+                        )}
                       </td>
                       <td className="hidden px-3 py-2 text-muted-foreground sm:table-cell">{new Date(t.created).toLocaleDateString()}</td>
                       <td className="px-3 py-2 text-right">

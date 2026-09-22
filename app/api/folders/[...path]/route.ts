@@ -1,15 +1,18 @@
 import { deleteFolderRecursive, renameFolder } from "@/lib/vault/write";
+import { resolveDashboardWorkspace } from "@/lib/workspace-resolve";
 
 export const dynamic = "force-dynamic";
 
 /** Rename/move a folder (every note under it). Body: { to: "new/folder/path" }. */
 export async function PATCH(req: Request, { params }: { params: Promise<{ path: string[] }> }) {
+  const ws = await resolveDashboardWorkspace(req);
+  if (!ws) return Response.json({ error: "no workspace access" }, { status: 403 });
   const { path } = await params;
   const rel = path.map(decodeURIComponent).join("/");
   const { to } = await req.json().catch(() => ({}));
   if (!to || typeof to !== "string") return Response.json({ error: "to (string) required" }, { status: 400 });
   try {
-    const result = await renameFolder(rel, to);
+    const result = await renameFolder(ws.dir, rel, to);
     return Response.json({ ok: true, ...result });
   } catch (e) {
     return Response.json({ error: e instanceof Error ? e.message : "rename failed" }, { status: 400 });
@@ -17,11 +20,13 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ path: 
 }
 
 /** Delete a folder and every note under it. Irreversible — dashboard confirms first. */
-export async function DELETE(_req: Request, { params }: { params: Promise<{ path: string[] }> }) {
+export async function DELETE(req: Request, { params }: { params: Promise<{ path: string[] }> }) {
+  const ws = await resolveDashboardWorkspace(req);
+  if (!ws) return Response.json({ error: "no workspace access" }, { status: 403 });
   const { path } = await params;
   const rel = path.map(decodeURIComponent).join("/");
   try {
-    const result = await deleteFolderRecursive(rel);
+    const result = await deleteFolderRecursive(ws.dir, rel);
     return Response.json({ ok: true, ...result });
   } catch (e) {
     return Response.json({ error: e instanceof Error ? e.message : "delete failed" }, { status: 400 });

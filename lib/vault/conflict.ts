@@ -70,12 +70,12 @@ export interface ConflictCandidate {
  * *supposed* to sit next to, and flagging it would refuse the correct workflow. Only `current` and
  * `authoritative` notes can be contradicted.
  */
-export function findConflicts(relPath: string, now: number = Date.now()): ConflictCandidate[] {
+export function findConflicts(dir: string, relPath: string, now: number = Date.now()): ConflictCandidate[] {
   const mine = subjectTokens(stemOf(relPath));
   if (mine.size === 0) return [];
 
   const out: ConflictCandidate[] = [];
-  for (const n of listNotes() as NoteMeta[]) {
+  for (const n of listNotes(dir) as NoteMeta[]) {
     if (n.path === relPath) continue;
     if (!sameSet(mine, subjectTokens(n.slug))) continue;
     const eff = overlayValidity(
@@ -94,9 +94,9 @@ export function findConflicts(relPath: string, now: number = Date.now()): Confli
  * Throw if creating `relPath` would contradict a live note. Callers pass `allowConflict` to
  * override — the escape hatch is deliberate and named in the message, mirroring `overwrite`.
  */
-export function guardConflict(relPath: string, isNewNote: boolean, allowConflict: boolean): void {
+export function guardConflict(dir: string, relPath: string, isNewNote: boolean, allowConflict: boolean): void {
   if (allowConflict || !isNewNote) return;
-  const clashes = findConflicts(relPath);
+  const clashes = findConflicts(dir, relPath);
   if (clashes.length === 0) return;
 
   const list = clashes.map((c) => `${c.path} (${c.authority})`).join(", ");

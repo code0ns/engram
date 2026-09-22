@@ -72,6 +72,7 @@ async function main() {
   const { TOOLS } = await import("@/lib/mcp/tools");
   const { callTool } = await import("@/lib/mcp/call");
   const { VERSION } = await import("@/lib/version");
+  const { VAULT_DIR } = await import("@/lib/config");
   const { Server } = await import("@modelcontextprotocol/sdk/server/index.js");
   const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
   const { ListToolsRequestSchema, CallToolRequestSchema } = await import("@modelcontextprotocol/sdk/types.js");
@@ -86,13 +87,15 @@ async function main() {
     // Via callTool, so this transport validates arguments against each tool's inputSchema exactly
     // like the HTTP route. Dispatching straight to `tool.handler` is what let a `brain_append`
     // carrying its payload under the wrong key write a blank line and report success.
-    const out = await callTool(req.params.name, req.params.arguments ?? {});
+    // Standalone stdio mode has exactly one vault — the resolved VAULT_DIR (arg, env, or the
+    // bundled sample) — never repos.json's multi-workspace model.
+    const out = await callTool(req.params.name, req.params.arguments ?? {}, { dir: VAULT_DIR });
     const text = typeof out === "string" ? out : JSON.stringify(out, null, 2);
     return { content: [{ type: "text", text }] };
   });
 
   // stderr only — stdout is the JSON-RPC channel and must stay clean.
-  console.error(`[engram] stdio MCP server ready · vault: ${process.env.VAULT_DIR ?? "(bundled sample-vault)"}`);
+  console.error(`[engram] stdio MCP server ready · vault: ${VAULT_DIR}`);
 
   await server.connect(new StdioServerTransport());
 }

@@ -1,4 +1,4 @@
-import { TOOL_MAP, type Tool } from "./tools";
+import { TOOL_MAP, type Tool, type ToolCtx } from "./tools";
 
 /**
  * The dispatch boundary: validate a tool call's arguments against the tool's OWN inputSchema,
@@ -108,10 +108,10 @@ export function validateArgs(tool: Tool, args: Args): string | null {
  *
  * Scope enforcement stays in the route: it depends on the authenticated caller, not the arguments.
  */
-export async function callTool(name: string, args: Args): Promise<unknown> {
+export async function callTool(name: string, args: Args, ctx: ToolCtx): Promise<unknown> {
   const tool = TOOL_MAP.get(name);
   if (!tool) throw new Error(`unknown tool: ${name}`);
   const problem = validateArgs(tool, args ?? {});
   if (problem) throw new Error(problem);
-  return await tool.handler(args ?? {});
+  return await tool.handler(args ?? {}, ctx);
 }

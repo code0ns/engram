@@ -1,11 +1,15 @@
 import { curatorStream, type ChatMessage } from "@/lib/curator";
 import { curatorEnabled } from "@/lib/settings";
+import { resolveDashboardWorkspace } from "@/lib/workspace-resolve";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 /** SSE stream of the Curator's reply, grounded in the vault via a server-side tool loop. */
 export async function POST(req: Request) {
+  const ws = await resolveDashboardWorkspace(req);
+  if (!ws) return new Response("no workspace access", { status: 403 });
+
   let body: { messages?: ChatMessage[]; model?: string; thinking?: boolean };
   try {
     body = await req.json();
@@ -23,7 +27,7 @@ export async function POST(req: Request) {
     async start(controller) {
       const send = (ev: unknown) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(ev)}\n\n`));
       try {
-        for await (const ev of curatorStream({ messages, model: body.model, thinking: body.thinking })) {
+        for await (const ev of curatorStream({ dir: ws.dir, messages, model: body.model, thinking: body.thinking })) {
           send(ev);
           if (ev.type === "done" || ev.type === "error") break;
         }

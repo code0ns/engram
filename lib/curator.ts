@@ -11,6 +11,7 @@ export type { ChatMessage };
 export type CuratorEvent = AgentEvent;
 
 export async function* curatorStream(opts: {
+  dir: string;
   messages: ChatMessage[];
   model?: string;
   thinking?: boolean;
@@ -19,6 +20,7 @@ export async function* curatorStream(opts: {
   // has chosen `full`. It still never deletes — that is a decision made in the UI.
   yield* agentStream({
     profile: "chat",
+    dir: opts.dir,
     messages: opts.messages,
     canWrite: curatorMode() === "full",
     actor: "curator (chat)",

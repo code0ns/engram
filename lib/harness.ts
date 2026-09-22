@@ -17,14 +17,14 @@ export interface CaptureResult extends Manifest {
  * a note before overwriting it, may archive but never delete, and reports a manifest of what it
  * actually touched — because the caller delegated the decision and deserves to see the outcome.
  */
-export async function captureNote(rough: string): Promise<CaptureResult> {
+export async function captureNote(rough: string, dir: string): Promise<CaptureResult> {
   if (!harnessEnabled())
     throw new Error("brain_capture is off — set the Curator to Full in Settings (needs an Anthropic API key).");
   if (!anthropicApiKey()) throw new Error("Anthropic API key not set (Settings → Curator).");
   if (!rough.trim()) throw new Error("Nothing to capture.");
 
   const today = new Date().toISOString().slice(0, 10);
-  const prompt = `Today is ${today}.\n\n${captureContext()}\n\nRough note to file:\n"""\n${rough}\n"""`;
+  const prompt = `Today is ${today}.\n\n${captureContext(dir)}\n\nRough note to file:\n"""\n${rough}\n"""`;
 
   let summary = "";
   let manifest: Manifest = { created: [], updated: [], appended: [], moved: [], superseded: [] };
@@ -32,6 +32,7 @@ export async function captureNote(rough: string): Promise<CaptureResult> {
 
   for await (const ev of agentStream({
     profile: "capture",
+    dir,
     messages: [{ role: "user", content: prompt }],
     canWrite: true,
     model: captureModel(),

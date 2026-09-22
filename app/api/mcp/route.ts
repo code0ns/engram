@@ -6,6 +6,7 @@ import { withActor } from "@/lib/actor";
 import { VERSION } from "@/lib/version";
 import { TOOL_MAP, visibleTools } from "@/lib/mcp/tools";
 import { callTool } from "@/lib/mcp/call";
+import { resolveTokenWorkspace, type TokenCaller } from "@/lib/workspace-resolve";
 
 export const dynamic = "force-dynamic";
 
@@ -14,10 +15,12 @@ const PROTOCOL = "2025-06-18";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Json = any;
 
-/** The authenticated caller: a name for the audit trail, and what it may do. */
+/** The authenticated caller: a name for the audit trail, what it may do, and which
+ *  workspace its credential is pinned to (lib/workspace-resolve.ts). */
 interface Caller {
   name: string;
   scope: TokenScope;
+  workspace: TokenCaller;
 }
 
 function rpc(id: Json, result?: Json, error?: Json) {
@@ -27,7 +30,7 @@ function rpc(id: Json, result?: Json, error?: Json) {
   return msg;
 }
 
-async function handleMessage(msg: Json, caller: Caller): Promise<Json | null> {
+async function handleMessage(msg: Json, caller: Caller, dir: string): Promise<Json | null> {
   const method: string | undefined = msg?.method;
   const id = msg?.id;
   const params = msg?.params;
@@ -65,7 +68,7 @@ async function handleMessage(msg: Json, caller: Caller): Promise<Json | null> {
         // Stamp every write this call causes with the caller's name, for the git audit trail.
         // callTool validates `arguments` against the tool's inputSchema first — a malformed call
         // must surface as an error, never as a successful no-op write.
-        const out = await withActor(caller.name, () => callTool(tool.name, params?.arguments ?? {}));
+        const out = await withActor(caller.name, () => callTool(tool.name, params?.arguments ?? {}, { dir }));
         const text = typeof out === "string" ? out : JSON.stringify(out, null, 2);
         return rpc(id, { content: [{ type: "text", text }] });
       } catch (e) {
@@ -87,12 +90,15 @@ function jsonResponse(body: Json, status = 200) {
  * unauthenticated local instance (no auth configured at all) is treated as the operator.
  */
 async function authenticate(token: string, authRequired: boolean): Promise<Caller | null> {
-  if (!authRequired) return { name: "local", scope: "write" };
+  if (!authRequired) return { name: "local", scope: "write", workspace: { kind: "local" } };
   if (!token) return null;
-  if (MCP_TOKEN !== "" && token === MCP_TOKEN) return { name: "shared-token", scope: "write" };
+  if (MCP_TOKEN !== "" && token === MCP_TOKEN) return { name: "shared-token", scope: "write", workspace: { kind: "shared" } };
   const named = resolveToken(token);
-  if (named) return { name: named.name, scope: named.scope };
-  if (oauthEnabled() && (await verifyAccessToken(token))) return { name: "oauth", scope: "write" };
+  if (named) return { name: named.name, scope: named.scope, workspace: { kind: "named", workspaceId: named.workspaceId } };
+  if (oauthEnabled()) {
+    const at = await verifyAccessToken(token);
+    if (at) return { name: "oauth", scope: "write", workspace: { kind: "oauth", email: at.sub } };
+  }
   return null;
 }
 
@@ -111,6 +117,9 @@ export async function POST(req: Request) {
   const caller = await authenticate(token, authRequired);
   if (!caller) return unauthorized();
 
+  const ws = resolveTokenWorkspace(caller.workspace);
+  if (!ws) return jsonResponse(rpc(null, undefined, { code: -32001, message: "no workspace access for this token" }), 403);
+
   let body: Json;
   try {
     body = await req.json();
@@ -119,10 +128,10 @@ export async function POST(req: Request) {
   }
 
   if (Array.isArray(body)) {
-    const out = (await Promise.all(body.map((m) => handleMessage(m, caller)))).filter(Boolean);
+    const out = (await Promise.all(body.map((m) => handleMessage(m, caller, ws.dir)))).filter(Boolean);
     return out.length === 0 ? new Response(null, { status: 202 }) : jsonResponse(out);
   }
-  const res = await handleMessage(body, caller);
+  const res = await handleMessage(body, caller, ws.dir);
   return res ? jsonResponse(res) : new Response(null, { status: 202 });
 }
 

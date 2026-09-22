@@ -37,15 +37,15 @@ test("stemOf strips alias, heading anchor, folder hint and extension", () => {
 test("an anchored wikilink produces a real backlink", () => {
   write("pricing.md", "# Pricing\n\n## Tiers\n\nfloor + share\n");
   write("leads/acme.md", "# Acme\n\nquoted from [[pricing#Tiers]] on the call\n");
-  rebuildIndex();
+  rebuildIndex(TEST_VAULT);
 
   // Before the anchor fix this stem was "pricing#Tiers", which matched no note, so the
   // link vanished: no backlink, no graph edge, silently.
-  expect(getBacklinks("pricing.md").map((b) => b.path)).toContain("leads/acme.md");
+  expect(getBacklinks(TEST_VAULT, "pricing.md").map((b) => b.path)).toContain("leads/acme.md");
 });
 
 test("a self-anchor does not invent a link", () => {
   write("pricing.md", "# Pricing\n\njump to [[#Tiers]]\n\n## Tiers\n\nfloor + share\n");
-  rebuildIndex();
-  expect(getBacklinks("pricing.md")).toEqual([]);
+  rebuildIndex(TEST_VAULT);
+  expect(getBacklinks(TEST_VAULT, "pricing.md")).toEqual([]);
 });

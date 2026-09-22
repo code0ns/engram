@@ -138,16 +138,28 @@ export function removeRepo(id: string): void {
   }
 }
 
-/** Re-clone the active repo if its working dir is missing (e.g. fresh volume). */
-export async function ensureActiveCloned(): Promise<void> {
-  const a = load().find((r) => r.active);
-  if (!a) return;
-  const dir = vaultDirFor(a.id);
+async function recloneIfMissing(r: StoredRepo): Promise<void> {
+  const dir = vaultDirFor(r.id);
   if (fs.existsSync(path.join(dir, ".git"))) return;
   try {
     fs.rmSync(dir, { recursive: true, force: true });
-    await runGit(() => simpleGit().clone(authedUrl(a.url, a.tokenEnc ? decryptSecret(a.tokenEnc) : undefined), dir));
+    await runGit(() => simpleGit().clone(authedUrl(r.url, r.tokenEnc ? decryptSecret(r.tokenEnc) : undefined), dir));
   } catch (e) {
-    console.error("[repos] re-clone failed", e);
+    console.error(`[repos] re-clone failed for ${r.name}`, e);
   }
+}
+
+/** Re-clone the active repo if its working dir is missing (e.g. fresh volume). */
+export async function ensureActiveCloned(): Promise<void> {
+  const a = load().find((r) => r.active);
+  if (a) await recloneIfMissing(a);
+}
+
+/**
+ * Re-clone EVERY connected workspace that's missing its working dir. Different people can
+ * now be resolved to different workspaces (lib/workspace-resolve.ts), so a fresh volume must
+ * bring all of them back, not just the one that happened to be globally "active".
+ */
+export async function ensureAllCloned(): Promise<void> {
+  for (const r of load()) await recloneIfMissing(r);
 }

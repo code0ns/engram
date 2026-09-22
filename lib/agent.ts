@@ -112,6 +112,8 @@ const MUTATION_KIND: Record<string, keyof Manifest> = {
 
 export interface AgentOpts {
   profile: AgentProfile;
+  /** Which workspace this run reads/writes (lib/workspace-resolve.ts resolved it upstream). */
+  dir: string;
   /** chat: the conversation. capture: a single user turn holding the rough dump. */
   messages: ChatMessage[];
   canWrite: boolean;
@@ -166,7 +168,7 @@ export async function* agentStream(opts: AgentOpts): AsyncGenerator<AgentEvent> 
 
     const target = typeof input.path === "string" ? normalizeNotePath(input.path) : "";
 
-    const blocked = guardOverwrite(name, target, (p) => readPaths.has(p));
+    const blocked = guardOverwrite(opts.dir, name, target, (p) => readPaths.has(p));
     if (blocked) return { error: blocked };
 
     // Validate against the tool's inputSchema first — a model driving this loop mixes up
@@ -176,7 +178,7 @@ export async function* agentStream(opts: AgentOpts): AsyncGenerator<AgentEvent> 
     const problem = validateArgs(tool, input);
     if (problem) return { error: problem };
 
-    const out = await withActor(opts.actor ?? "curator", () => tool.handler(input));
+    const out = await withActor(opts.actor ?? "curator", () => tool.handler(input, { dir: opts.dir }));
 
     if (name === "brain_read" && target) readPaths.add(target);
 
@@ -254,9 +256,9 @@ export async function* agentStream(opts: AgentOpts): AsyncGenerator<AgentEvent> 
 }
 
 /** Vault context injected into a capture, so the model doesn't have to discover it by tool call. */
-export function captureContext(): string {
-  const schema = readVaultFile("SCHEMA.md") ?? "(no SCHEMA.md)";
-  const c = vaultConventions();
+export function captureContext(dir: string): string {
+  const schema = readVaultFile(dir, "SCHEMA.md") ?? "(no SCHEMA.md)";
+  const c = vaultConventions(dir);
   return [
     `Existing folders: ${c.folders.join(", ") || "(none yet)"}`,
     `Statuses in use: ${c.statusesInUse.map((s) => s.status).join(", ") || "(none)"}`,

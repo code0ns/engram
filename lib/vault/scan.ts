@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import { VAULT_IGNORE } from "@/lib/config";
-import { activeVaultDir } from "@/lib/repos";
 
 export interface ScannedFile {
   rel: string;
@@ -9,8 +8,10 @@ export interface ScannedFile {
   mtimeMs: number;
 }
 
-/** Recursively collect .md files under the vault, skipping ignored + dot dirs. */
-export function scanVault(root = activeVaultDir()): ScannedFile[] {
+/** Recursively collect .md files under the vault, skipping ignored + dot dirs. `root` is
+ *  required (not defaulted to a global "active" vault) — a caller must always say which
+ *  workspace it means, now that more than one can be in play at once. */
+export function scanVault(root: string): ScannedFile[] {
   const out: ScannedFile[] = [];
 
   function walk(dir: string) {

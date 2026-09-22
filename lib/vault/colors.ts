@@ -1,5 +1,4 @@
 import fsp from "node:fs/promises";
-import { activeVaultDir } from "@/lib/repos";
 import { resolveInVault } from "./paths";
 import { requestSync } from "@/lib/git";
 import { currentActor } from "@/lib/actor";
@@ -8,13 +7,13 @@ import { currentActor } from "@/lib/actor";
  *  everything else, rather than as host-local app state that wouldn't follow a re-clone. */
 const COLORS_FILE = ".engram-colors.json";
 
-function colorsFileAbs(): string {
-  return resolveInVault(activeVaultDir(), COLORS_FILE);
+function colorsFileAbs(dir: string): string {
+  return resolveInVault(dir, COLORS_FILE);
 }
 
-export async function getFolderColorOverrides(): Promise<Record<string, string>> {
+export async function getFolderColorOverrides(dir: string): Promise<Record<string, string>> {
   try {
-    const raw = await fsp.readFile(colorsFileAbs(), "utf8");
+    const raw = await fsp.readFile(colorsFileAbs(dir), "utf8");
     const parsed = JSON.parse(raw);
     return parsed && typeof parsed === "object" ? parsed : {};
   } catch {
@@ -22,10 +21,10 @@ export async function getFolderColorOverrides(): Promise<Record<string, string>>
   }
 }
 
-export async function setFolderColor(folder: string, color: string): Promise<void> {
+export async function setFolderColor(dir: string, folder: string, color: string): Promise<void> {
   if (!/^#[0-9a-f]{6}$/i.test(color)) throw new Error("color must be a #rrggbb hex string");
-  const current = await getFolderColorOverrides();
+  const current = await getFolderColorOverrides(dir);
   current[folder] = color;
-  await fsp.writeFile(colorsFileAbs(), `${JSON.stringify(current, null, 2)}\n`, "utf8");
-  requestSync(`${currentActor()}: set color for ${folder}`);
+  await fsp.writeFile(colorsFileAbs(dir), `${JSON.stringify(current, null, 2)}\n`, "utf8");
+  requestSync(dir, `${currentActor()}: set color for ${folder}`);
 }

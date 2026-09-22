@@ -1,6 +1,6 @@
-// Runs once when the server starts. Re-clones the active workspace's vault if missing
-// (e.g. a fresh volume), pulls the latest from its remote, then starts a periodic pull so
-// externally-pushed changes keep flowing in without a redeploy.
+// Runs once when the server starts. Re-clones every connected workspace's vault if missing
+// (e.g. a fresh volume), pulls the latest from each remote, then starts a periodic pull loop
+// (all workspaces) so externally-pushed changes keep flowing in without a redeploy.
 //
 // The vault sync is deliberately DEFERRED off the startup path. It used to run inline here,
 // which meant boot did: load Next.js -> immediately fork a git subprocess. That is the worst
@@ -30,10 +30,10 @@ export async function register() {
   const timer = setTimeout(() => {
     void (async () => {
       try {
-        const { ensureActiveCloned } = await import("@/lib/repos");
-        const { pullActive, startPullLoop } = await import("@/lib/git");
-        await ensureActiveCloned();
-        await pullActive().catch(() => {});
+        const { ensureAllCloned, listRepos, vaultDirFor } = await import("@/lib/repos");
+        const { pullWorkspace, startPullLoop } = await import("@/lib/git");
+        await ensureAllCloned();
+        for (const repo of listRepos()) await pullWorkspace(vaultDirFor(repo.id)).catch(() => {});
         startPullLoop();
       } catch (e) {
         // Never rethrow: a broken sync must not take the server down with it.

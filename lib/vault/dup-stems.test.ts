@@ -51,22 +51,22 @@ test("a linked duplicate stem is never logged — not once, not on any reindex",
   fourWay("README");
   write("notes/a.md", "# A\n\nsee [[README]] for context\n");
 
-  expect(consoleOutput(rebuildIndex)).toEqual([]);
+  expect(consoleOutput(() => rebuildIndex(TEST_VAULT))).toEqual([]);
 
   // Every write re-runs recomputeLinks; a full rebuild runs it too. All must stay silent.
   for (let i = 0; i < 3; i++) {
     write(`notes/b${i}.md`, `# B${i}\n\nunrelated\n`);
-    expect(consoleOutput(() => refreshPaths([`notes/b${i}.md`]))).toEqual([]);
+    expect(consoleOutput(() => refreshPaths(TEST_VAULT, [`notes/b${i}.md`]))).toEqual([]);
   }
-  expect(consoleOutput(rebuildIndex)).toEqual([]);
+  expect(consoleOutput(() => rebuildIndex(TEST_VAULT))).toEqual([]);
 });
 
 test("the collision is reported in full by the integrity report instead", () => {
   fourWay("README");
   write("notes/a.md", "# A\n\nsee [[README]] for context\n");
-  rebuildIndex();
+  rebuildIndex(TEST_VAULT);
 
-  const { integrity } = vaultConventions();
+  const { integrity } = vaultConventions(TEST_VAULT);
   const dupe = integrity.duplicateStems.find((d) => d.stem === "README");
   expect(dupe).toBeDefined();
   expect(dupe!.paths).toEqual(["README.md", "archive/README.md", "leads/README.md", "leads/brands/README.md"]);
@@ -79,9 +79,9 @@ test("the collision is reported in full by the integrity report instead", () => 
 test("a collision no wikilink reaches is listed but not flagged", () => {
   fourWay("OVERVIEW");
   write("notes/a.md", "# A\n\nno wikilinks here\n");
-  rebuildIndex();
+  rebuildIndex(TEST_VAULT);
 
-  const { integrity } = vaultConventions();
+  const { integrity } = vaultConventions(TEST_VAULT);
   // Still visible — the report is the full picture.
   expect(integrity.duplicateStems.find((d) => d.stem === "OVERVIEW")).toBeDefined();
   expect(integrity.duplicateStems.find((d) => d.stem === "OVERVIEW")!.linkedFrom).toBeUndefined();

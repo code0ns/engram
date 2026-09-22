@@ -1,7 +1,6 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
 import matter from "gray-matter";
-import { activeVaultDir } from "@/lib/repos";
 import { refreshPaths, getNote, listNotes } from "./store";
 import { humanize, stemOf } from "./parse";
 import { checkFrontmatter, frontmatterErrorMessage } from "./validate";
@@ -9,11 +8,6 @@ import { guardConflict } from "./conflict";
 import { resolveInVault } from "./paths";
 import { requestSync } from "@/lib/git";
 import { currentActor } from "@/lib/actor";
-
-/** Resolve a vault-relative path to an absolute path in the active vault, refusing escapes. */
-function safeAbs(relPath: string): string {
-  return resolveInVault(activeVaultDir(), relPath);
-}
 
 export function normalizeNotePath(relPath: string): string {
   const p = relPath.replace(/\\/g, "/").replace(/^\/+/, "").replace(/\.\.(\/|$)/g, "");
@@ -25,9 +19,9 @@ export function normalizeNotePath(relPath: string): string {
  * The actor prefix is what turns the Activity feed into an audit trail rather than a
  * list of anonymous edits. `touched` are vault-relative paths.
  */
-function after(message: string, touched: string[]) {
-  refreshPaths(touched);
-  requestSync(`${currentActor()}: ${message}`);
+function after(dir: string, message: string, touched: string[]) {
+  refreshPaths(dir, touched);
+  requestSync(dir, `${currentActor()}: ${message}`);
 }
 
 export interface WriteOpts {
@@ -91,12 +85,12 @@ async function guardTruncation(abs: string, relPath: string, next: string, allow
  * caller — see lib/mcp/session.ts). It used to live only in the loop, which left the surface that
  * matters most, a coding agent writing over MCP, protected by the size heuristic alone.
  */
-export function guardOverwrite(toolName: string, target: string, hasRead: (p: string) => boolean): string | null {
+export function guardOverwrite(dir: string, toolName: string, target: string, hasRead: (p: string) => boolean): string | null {
   if (toolName !== "brain_write" && toolName !== "brain_edit") return null;
   if (!target || hasRead(target)) return null;
   let exists = false;
   try {
-    exists = getNote(normalizeNotePath(target)) !== null;
+    exists = getNote(dir, normalizeNotePath(target)) !== null;
   } catch {
     return null;
   }
@@ -114,20 +108,20 @@ async function fileExists(abs: string): Promise<boolean> {
 }
 
 /** Write a note from a raw markdown string (frontmatter included). Used by the editor. */
-export async function writeNoteRaw(relPath: string, content: string, opts: WriteOpts = {}): Promise<string> {
+export async function writeNoteRaw(dir: string, relPath: string, content: string, opts: WriteOpts = {}): Promise<string> {
   const p = normalizeNotePath(relPath);
   if (opts.strict) {
     const check = checkFrontmatter(content);
     if (!check.ok) throw new Error(frontmatterErrorMessage(p, check.error!));
   }
-  const abs = safeAbs(p);
+  const abs = resolveInVault(dir, p);
   // Agents only. A human in the editor who names a note `pricing-2026` next to `pricing` can see
   // both in the sidebar and meant it; an agent usually has not looked.
-  if (opts.strict) guardConflict(p, !(await fileExists(abs)), opts.allowConflict === true);
+  if (opts.strict) guardConflict(dir, p, !(await fileExists(abs)), opts.allowConflict === true);
   await guardTruncation(abs, p, content, opts.allowShrink === true);
   await fsp.mkdir(path.dirname(abs), { recursive: true });
   await fsp.writeFile(abs, content, "utf8");
-  after(`edit ${p}`, [p]);
+  after(dir, `edit ${p}`, [p]);
   return p;
 }
 
@@ -137,6 +131,7 @@ export async function writeNoteRaw(relPath: string, content: string, opts: Write
  * produce the corruption that hand-written frontmatter can.
  */
 export async function writeNote(
+  dir: string,
   relPath: string,
   body: string,
   frontmatter?: Record<string, unknown>,
@@ -144,7 +139,7 @@ export async function writeNote(
 ): Promise<string> {
   const content =
     frontmatter && Object.keys(frontmatter).length > 0 ? matter.stringify(body ?? "", frontmatter) : (body ?? "");
-  return writeNoteRaw(relPath, content, { ...opts, strict: true });
+  return writeNoteRaw(dir, relPath, content, { ...opts, strict: true });
 }
 
 /**
@@ -156,7 +151,7 @@ export async function writeNote(
  * to append is never intentional, and the write path must not be the layer that discovers this
  * quietly.
  */
-export async function appendNote(relPath: string, text: string): Promise<string> {
+export async function appendNote(dir: string, relPath: string, text: string): Promise<string> {
   const p = normalizeNotePath(relPath);
   if (typeof text !== "string" || text.trim() === "") {
     throw new Error(
@@ -164,7 +159,7 @@ export async function appendNote(relPath: string, text: string): Promise<string>
         `(brain_append takes \`text\`, not \`content\` or \`body\`). The note was not modified.`,
     );
   }
-  const abs = safeAbs(p);
+  const abs = resolveInVault(dir, p);
   let existing = "";
   try {
     existing = await fsp.readFile(abs, "utf8");
@@ -174,22 +169,22 @@ export async function appendNote(relPath: string, text: string): Promise<string>
   await fsp.mkdir(path.dirname(abs), { recursive: true });
   const sep = existing && !existing.endsWith("\n") ? "\n" : "";
   await fsp.writeFile(abs, `${existing}${sep}${text}\n`, "utf8");
-  after(`append ${p}`, [p]);
+  after(dir, `append ${p}`, [p]);
   return p;
 }
 
-export async function moveNote(from: string, to: string): Promise<string> {
-  const a = safeAbs(normalizeNotePath(from));
-  const b = safeAbs(normalizeNotePath(to));
+export async function moveNote(dir: string, from: string, to: string): Promise<string> {
+  const a = resolveInVault(dir, normalizeNotePath(from));
+  const b = resolveInVault(dir, normalizeNotePath(to));
   await fsp.mkdir(path.dirname(b), { recursive: true });
   await fsp.rename(a, b);
-  after(`move ${from} -> ${to}`, [normalizeNotePath(from), normalizeNotePath(to)]);
+  after(dir, `move ${from} -> ${to}`, [normalizeNotePath(from), normalizeNotePath(to)]);
   return normalizeNotePath(to);
 }
 
-export async function deleteNote(relPath: string): Promise<void> {
-  await fsp.rm(safeAbs(normalizeNotePath(relPath)));
-  after(`delete ${relPath}`, [normalizeNotePath(relPath)]);
+export async function deleteNote(dir: string, relPath: string): Promise<void> {
+  await fsp.rm(resolveInVault(dir, normalizeNotePath(relPath)));
+  after(dir, `delete ${relPath}`, [normalizeNotePath(relPath)]);
 }
 
 /**
@@ -205,6 +200,7 @@ export async function deleteNote(relPath: string): Promise<void> {
  * which would split the operation across two commits.
  */
 export async function supersedeNote(
+  dir: string,
   from: string,
   to: string,
   reason?: string,
@@ -213,8 +209,8 @@ export async function supersedeNote(
   const fromPath = normalizeNotePath(from);
   const toPath = normalizeNotePath(to);
   if (fromPath === toPath) throw new Error("supersede: `from` and `to` must be different notes.");
-  const fromAbs = safeAbs(fromPath);
-  const toAbs = safeAbs(toPath);
+  const fromAbs = resolveInVault(dir, fromPath);
+  const toAbs = resolveInVault(dir, toPath);
 
   let oldRaw: string;
   try {
@@ -265,16 +261,16 @@ export async function supersedeNote(
     await fsp.mkdir(path.dirname(toAbs), { recursive: true });
     await fsp.writeFile(toAbs, newContent, "utf8");
   }
-  after(`supersede ${fromPath} -> ${toPath}${reason ? `: ${reason}` : ""}`, [fromPath, toPath]);
+  after(dir, `supersede ${fromPath} -> ${toPath}${reason ? `: ${reason}` : ""}`, [fromPath, toPath]);
   return { from: fromPath, to: toPath };
 }
 
-export async function createFolder(relPath: string): Promise<string> {
+export async function createFolder(dir: string, relPath: string): Promise<string> {
   const p = relPath.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").replace(/\.\.(\/|$)/g, "");
-  const abs = safeAbs(p);
+  const abs = resolveInVault(dir, p);
   await fsp.mkdir(abs, { recursive: true });
   await fsp.writeFile(path.join(abs, ".gitkeep"), "", "utf8");
-  requestSync(`${currentActor()}: mkdir ${p}`);
+  requestSync(dir, `${currentActor()}: mkdir ${p}`);
   return p;
 }
 
@@ -287,47 +283,47 @@ function cleanFolderPath(relPath: string): string {
  * Folders are not real objects here — they only exist because notes live under that path
  * prefix — so "renaming" one means rewriting every note's path under the new prefix.
  */
-export async function renameFolder(from: string, to: string): Promise<{ moved: number }> {
+export async function renameFolder(dir: string, from: string, to: string): Promise<{ moved: number }> {
   const fromP = cleanFolderPath(from);
   const toP = cleanFolderPath(to);
   if (!fromP || !toP) throw new Error("renameFolder: both paths are required");
   if (fromP === toP) throw new Error("renameFolder: from and to must differ");
   const prefix = `${fromP}/`;
-  const notes = listNotes().filter((n) => n.path.startsWith(prefix));
+  const notes = listNotes(dir).filter((n) => n.path.startsWith(prefix));
   if (notes.length === 0) throw new Error(`renameFolder: no notes found under ${fromP}/`);
   const touched: string[] = [];
   for (const n of notes) {
     const rest = n.path.slice(prefix.length);
     const dest = `${toP}/${rest}`;
-    const a = safeAbs(dest.replace(/\.md$/i, "") + ".md");
+    const a = resolveInVault(dir, dest.replace(/\.md$/i, "") + ".md");
     await fsp.mkdir(path.dirname(a), { recursive: true });
-    await fsp.rename(safeAbs(n.path), a);
+    await fsp.rename(resolveInVault(dir, n.path), a);
     touched.push(n.path, dest);
   }
-  refreshPaths(touched);
-  requestSync(`${currentActor()}: rename folder ${fromP} -> ${toP} (${notes.length} note(s))`);
+  refreshPaths(dir, touched);
+  requestSync(dir, `${currentActor()}: rename folder ${fromP} -> ${toP} (${notes.length} note(s))`);
   return { moved: notes.length };
 }
 
 /** Delete every note under a folder prefix, then one sync commit. Irreversible — the caller
  *  (the dashboard) is responsible for confirming with the human first. */
-export async function deleteFolderRecursive(relPath: string): Promise<{ deleted: number }> {
+export async function deleteFolderRecursive(dir: string, relPath: string): Promise<{ deleted: number }> {
   const p = cleanFolderPath(relPath);
   if (!p) throw new Error("deleteFolderRecursive: path is required");
   const prefix = `${p}/`;
-  const notes = listNotes().filter((n) => n.path.startsWith(prefix));
+  const notes = listNotes(dir).filter((n) => n.path.startsWith(prefix));
   const touched: string[] = [];
   for (const n of notes) {
-    await fsp.rm(safeAbs(n.path));
+    await fsp.rm(resolveInVault(dir, n.path));
     touched.push(n.path);
   }
   // The folder itself may still exist on disk (a .gitkeep, or now-empty) — remove it too.
   try {
-    await fsp.rm(safeAbs(p), { recursive: true, force: true });
+    await fsp.rm(resolveInVault(dir, p), { recursive: true, force: true });
   } catch {
     /* already gone */
   }
-  refreshPaths(touched);
-  requestSync(`${currentActor()}: delete folder ${p} (${notes.length} note(s))`);
+  refreshPaths(dir, touched);
+  requestSync(dir, `${currentActor()}: delete folder ${p} (${notes.length} note(s))`);
   return { deleted: notes.length };
 }

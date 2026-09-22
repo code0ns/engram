@@ -27,13 +27,19 @@ import { hasRead, recordRead } from "./session";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Args = Record<string, any>;
 
+/** Which workspace this call resolved to (lib/workspace-resolve.ts) — threaded into every
+ *  handler instead of the vault layer resolving its own "current" vault implicitly. */
+export interface ToolCtx {
+  dir: string;
+}
+
 export interface Tool {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
   /** True when the tool mutates the vault. Read-only tokens may not call these. */
   write?: boolean;
-  handler: (args: Args) => Promise<unknown> | unknown;
+  handler: (args: Args, ctx: ToolCtx) => Promise<unknown> | unknown;
 }
 
 const s = (description: string) => ({ type: "string", description });
@@ -46,7 +52,7 @@ const s = (description: string) => ({ type: "string", description });
  *   - `body` (+ optional `frontmatter` object) → structured write.
  * Throws on an empty write instead of silently creating an empty note.
  */
-async function writeFromArgs(a: Args): Promise<string> {
+async function writeFromArgs(dir: string, a: Args): Promise<string> {
   const p = String(a.path);
   const fm = a.frontmatter && typeof a.frontmatter === "object" ? a.frontmatter : undefined;
   const hasFm = !!fm && Object.keys(fm).length > 0;
@@ -57,8 +63,8 @@ async function writeFromArgs(a: Args): Promise<string> {
   // allowShrink: only when the caller explicitly says it means to replace the note.
   // allowConflict: only when the caller says a near-duplicate note is deliberate.
   const opts = { strict: true, allowShrink: a.overwrite === true, allowConflict: a.allow_conflict === true };
-  if (raw.trim() !== "") return writeNoteRaw(p, raw, opts);
-  if (bodyStr.trim() !== "" || hasFm) return writeNote(p, bodyStr, fm, opts);
+  if (raw.trim() !== "") return writeNoteRaw(dir, p, raw, opts);
+  if (bodyStr.trim() !== "" || hasFm) return writeNote(dir, p, bodyStr, fm, opts);
   throw new Error(
     "Nothing to write. Pass `body` (markdown, + optional `frontmatter` object) or `content` (full raw markdown incl. frontmatter). Refusing to create an empty note.",
   );
@@ -70,13 +76,13 @@ async function writeFromArgs(a: Args): Promise<string> {
  * unrecognised `status:` falls through to `current`. Either way a note claiming to be the source
  * of truth ranks as an ordinary one. The agent that wrote it should hear about it now.
  */
-async function writeResult(a: Args, toolName: string) {
+async function writeResult(dir: string, a: Args, toolName: string) {
   // Read-before-overwrite. The Curator loop has enforced this for a while; over MCP a coding agent
   // could still clobber a note it had never opened, protected only by the size heuristic in write.ts.
-  const blocked = guardOverwrite(toolName, a.path ? normalizeNotePath(String(a.path)) : "", hasRead);
+  const blocked = guardOverwrite(dir, toolName, a.path ? normalizeNotePath(String(a.path)) : "", hasRead);
   if (blocked) throw new Error(blocked);
-  const p = await writeFromArgs(a);
-  const n = getNote(p);
+  const p = await writeFromArgs(dir, a);
+  const n = getNote(dir, p);
   if (n?.frontmatterError) {
     return {
       ok: true,
@@ -100,9 +106,9 @@ export const TOOLS: Tool[] = [
     description:
       "READ THIS FIRST, before searching or writing. Returns the vault's SCHEMA.md (folder taxonomy, frontmatter conventions, wikilink model, write protocol) AND a live description of this specific vault: its folders, the `status:` values actually in use, how search ranks notes by authority, and any integrity warnings. Vaults differ — never assume conventions, read them here.",
     inputSchema: { type: "object", properties: {} },
-    handler: () => ({
-      schema: readVaultFile("SCHEMA.md") ?? "(no SCHEMA.md in this vault)",
-      conventions: vaultConventions(),
+    handler: (_a, { dir }) => ({
+      schema: readVaultFile(dir, "SCHEMA.md") ?? "(no SCHEMA.md in this vault)",
+      conventions: vaultConventions(dir),
     }),
   },
   {
@@ -123,8 +129,8 @@ export const TOOLS: Tool[] = [
       },
       required: ["query"],
     },
-    handler: ({ query, limit, folder, includeArchive, includeInvalid }) =>
-      searchNotes(String(query ?? ""), {
+    handler: ({ query, limit, folder, includeArchive, includeInvalid }, { dir }) =>
+      searchNotes(dir, String(query ?? ""), {
         limit: typeof limit === "number" ? limit : 20,
         folder: folder ? String(folder) : undefined,
         includeArchive: includeArchive === true,
@@ -145,8 +151,8 @@ export const TOOLS: Tool[] = [
       },
       required: ["path"],
     },
-    handler: ({ path, section }) => {
-      const n = getNote(String(path));
+    handler: ({ path, section }, { dir }) => {
+      const n = getNote(dir, String(path));
       if (!n) return { error: "not found", path };
       const eff = effectiveAuthority(n);
       const base = {
@@ -156,7 +162,7 @@ export const TOOLS: Tool[] = [
         authority: eff.authority,
         tags: n.tags,
         frontmatter: n.frontmatter,
-        backlinks: getBacklinks(n.path).map((b) => b.path),
+        backlinks: getBacklinks(dir, n.path).map((b) => b.path),
         ...(n.frontmatterError
           ? {
               warning: `This note's frontmatter is unparseable (${n.frontmatterError}), so its status, tags and title are being ignored — whatever it claims about itself is NOT in effect. Usual cause: an unquoted ":" in a value.`,
@@ -186,8 +192,8 @@ export const TOOLS: Tool[] = [
     description:
       "List every note with metadata (path, title, folder, type, tags, status, authority). Use to discover what exists. `authority` tells you which notes are source-of-truth and which are history.",
     inputSchema: { type: "object", properties: {} },
-    handler: () =>
-      listNotes().map((n) => ({
+    handler: (_a, { dir }) =>
+      listNotes(dir).map((n) => ({
         path: n.path,
         title: n.title,
         folder: n.folder,
@@ -208,9 +214,9 @@ export const TOOLS: Tool[] = [
         limit: { type: "number", description: "max results (default 20)" },
       },
     },
-    handler: ({ since, limit }) => {
+    handler: ({ since, limit }, { dir }) => {
       const t = since ? Date.parse(String(since)) : NaN;
-      return listRecent(Number.isNaN(t) ? undefined : t, typeof limit === "number" ? limit : 20).map((n) => ({
+      return listRecent(dir, Number.isNaN(t) ? undefined : t, typeof limit === "number" ? limit : 20).map((n) => ({
         path: n.path,
         title: n.title,
         folder: n.folder,
@@ -224,19 +230,19 @@ export const TOOLS: Tool[] = [
     name: "brain_tree",
     description: "Return the folder/file tree of the vault.",
     inputSchema: { type: "object", properties: {} },
-    handler: () => getTree(),
+    handler: (_a, { dir }) => getTree(dir),
   },
   {
     name: "brain_backlinks",
     description: "Notes that link to the given note.",
     inputSchema: { type: "object", properties: { path: s("vault-relative path") }, required: ["path"] },
-    handler: ({ path }) => ({ backlinks: getBacklinks(String(path)).map((n) => n.path) }),
+    handler: ({ path }, { dir }) => ({ backlinks: getBacklinks(dir, String(path)).map((n) => n.path) }),
   },
   {
     name: "brain_graph",
     description: "The knowledge graph (nodes + edges from wikilinks and related:). Optional folder filter.",
     inputSchema: { type: "object", properties: { folder: s("optional folder filter") } },
-    handler: ({ folder }) => getGraph(folder ? String(folder) : undefined),
+    handler: ({ folder }, { dir }) => getGraph(dir, folder ? String(folder) : undefined),
   },
   {
     name: "brain_write",
@@ -256,7 +262,7 @@ export const TOOLS: Tool[] = [
       },
       required: ["path"],
     },
-    handler: async (a) => await writeResult(a, "brain_write"),
+    handler: async (a, ctx) => await writeResult(ctx.dir, a, "brain_write"),
   },
   {
     name: "brain_edit",
@@ -275,7 +281,7 @@ export const TOOLS: Tool[] = [
       },
       required: ["path"],
     },
-    handler: async (a) => await writeResult(a, "brain_edit"),
+    handler: async (a, ctx) => await writeResult(ctx.dir, a, "brain_edit"),
   },
   {
     name: "brain_append",
@@ -286,9 +292,9 @@ export const TOOLS: Tool[] = [
       properties: { path: s("vault-relative path"), text: s("text to append") },
       required: ["path", "text"],
     },
-    handler: async ({ path, text }) => {
-      const p = await appendNote(String(path), String(text ?? ""));
-      const n = getNote(p);
+    handler: async ({ path, text }, { dir }) => {
+      const p = await appendNote(dir, String(path), String(text ?? ""));
+      const n = getNote(dir, p);
       return n?.frontmatterError ? { ok: true, path: p, warning: `Frontmatter unparseable (${n.frontmatterError}) — status and tags ignored.` } : { ok: true, path: p };
     },
   },
@@ -298,14 +304,14 @@ export const TOOLS: Tool[] = [
     description:
       "Move or rename a note. This is how you retire something: when a note stops being true, move it to an archive folder (see brain_schema → conventions.ranking.archiveFolders) rather than deleting it. Archived notes are demoted in search and excluded by default, so they stop misleading agents while the reasoning trail survives. Leave a pointer in the replacement note saying what superseded what.",
     inputSchema: { type: "object", properties: { from: s("current path"), to: s("new path") }, required: ["from", "to"] },
-    handler: async ({ from, to }) => ({ ok: true, path: await moveNote(String(from), String(to)) }),
+    handler: async ({ from, to }, { dir }) => ({ ok: true, path: await moveNote(dir, String(from), String(to)) }),
   },
   {
     name: "brain_create_folder",
     write: true,
     description: "Create a new folder in the vault (with a .gitkeep).",
     inputSchema: { type: "object", properties: { path: s("folder path") }, required: ["path"] },
-    handler: async ({ path }) => ({ ok: true, path: await createFolder(String(path)) }),
+    handler: async ({ path }, { dir }) => ({ ok: true, path: await createFolder(dir, String(path)) }),
   },
   {
     name: "brain_supersede",
@@ -323,8 +329,9 @@ export const TOOLS: Tool[] = [
       },
       required: ["from", "to"],
     },
-    handler: async ({ from, to, reason, body }) => {
+    handler: async ({ from, to, reason, body }, { dir }) => {
       const r = await supersedeNote(
+        dir,
         String(from),
         String(to),
         reason ? String(reason) : undefined,
@@ -340,9 +347,9 @@ export const TOOLS: Tool[] = [
       "Hand over a ROUGH note / brain-dump and let the vault file it. An agent loop reads SCHEMA.md, searches for what already exists, then deliberately creates a new note, appends to a matching one, or archives what this supersedes — and returns a manifest of every path it touched. It reads a note before overwriting it, and never deletes. Use when you have unstructured input and don't want to choose the path yourself; use brain_write when you do.",
     inputSchema: { type: "object", properties: { text: s("the rough note / brain dump to file") }, required: ["text"] },
     // Imported lazily: harness -> agent -> tools would otherwise be a module cycle.
-    handler: async ({ text }) => {
+    handler: async ({ text }, { dir }) => {
       const { captureNote } = await import("@/lib/harness");
-      return await captureNote(String(text ?? ""));
+      return await captureNote(String(text ?? ""), dir);
     },
   },
   {
@@ -351,8 +358,8 @@ export const TOOLS: Tool[] = [
     description:
       "Delete a note (recoverable via git history). Prefer brain_move into an archive folder — deleting destroys the reasoning trail, archiving only removes it from search. Delete when the note is wrong or duplicated, archive when it is merely no longer true.",
     inputSchema: { type: "object", properties: { path: s("vault-relative path") }, required: ["path"] },
-    handler: async ({ path }) => {
-      await deleteNote(String(path));
+    handler: async ({ path }, { dir }) => {
+      await deleteNote(dir, String(path));
       return { ok: true };
     },
   },

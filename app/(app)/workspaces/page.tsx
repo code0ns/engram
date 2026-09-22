@@ -40,6 +40,12 @@ interface Repo {
   active: boolean;
   addedAt: string;
 }
+interface ReposResponse {
+  repos: Repo[];
+  active: Repo | null;
+  /** This session's current workspace — may differ per person now that access is scoped. */
+  currentWorkspaceId: string | null;
+}
 interface GhRepo {
   fullName: string;
   name: string;
@@ -54,7 +60,7 @@ function refresh(mutate: (key: string) => unknown) {
 
 export default function WorkspacesPage() {
   const { data: gh } = useSWR<{ connected: boolean; login?: string; configured: boolean }>("/api/github/status", fetcher);
-  const { data: reposData } = useSWR<{ repos: Repo[] }>("/api/repos", fetcher);
+  const { data: reposData } = useSWR<ReposResponse>("/api/repos", fetcher);
   const { data: ghRepos } = useSWR<{ repos: GhRepo[] }>(gh?.connected ? "/api/github/repos" : null, fetcher);
   const { mutate } = useSWRConfig();
 
@@ -66,6 +72,7 @@ export default function WorkspacesPage() {
   const [editing, setEditing] = useState<{ id: string; name: string } | null>(null);
 
   const repos = reposData?.repos ?? [];
+  const currentWorkspaceId = reposData?.currentWorkspaceId ?? null;
   const addedNames = new Set(repos.map((r) => r.fullName));
 
   async function add(r: GhRepo) {
@@ -115,8 +122,18 @@ export default function WorkspacesPage() {
   }
 
   async function switchTo(id: string) {
-    await fetch("/api/repos/active", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id }) });
-    refresh(mutate);
+    setBusy(`switch-${id}`);
+    const res = await fetch("/api/repos/active", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id }) });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      setErr(d.error || "switch failed");
+      setBusy(null);
+      return;
+    }
+    // Switching workspace changes nearly every piece of cached client state (tree, notes,
+    // search, graph, activity, folder colors, command palette) — a full reload can't leak
+    // stale cross-workspace data the way enumerating every SWR key to invalidate could.
+    window.location.reload();
   }
   async function remove(id: string) {
     await fetch(`/api/repos/${id}`, { method: "DELETE" });
@@ -140,8 +157,9 @@ export default function WorkspacesPage() {
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">Workspaces</h1>
             <p className="mt-2 max-w-xl text-sm text-muted-foreground">
-              Each workspace is a GitHub repo of markdown. The <span className="text-foreground">active</span> one is what
-              the dashboard shows and what agents read/write — agents never see the others.
+              Each workspace is a GitHub repo of markdown. You only see the ones you&apos;re granted —
+              switch between them below, or manage who has access to what on the{" "}
+              <a href="/access" className="text-foreground underline underline-offset-2">Access page</a>.
             </p>
           </div>
 
@@ -254,8 +272,10 @@ export default function WorkspacesPage() {
               </Button>
             </Card>
           ) : (
-            repos.map((r) => (
-              <Card key={r.id} className={`flex-row items-center gap-4 p-4 ${r.active ? "border-ring" : ""}`}>
+            repos.map((r) => {
+              const isCurrent = r.id === currentWorkspaceId;
+              return (
+              <Card key={r.id} className={`flex-row items-center gap-4 p-4 ${isCurrent ? "border-ring" : ""}`}>
                 <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-border text-muted-foreground">
                   <GitBranch size={16} />
                 </div>
@@ -282,7 +302,7 @@ export default function WorkspacesPage() {
                   ) : (
                     <div className="flex items-center gap-2">
                       <span className="truncate text-sm font-medium">{r.name}</span>
-                      {r.active && <Badge variant="secondary" className="h-5 px-1.5 text-[10px]">active</Badge>}
+                      {isCurrent && <Badge variant="secondary" className="h-5 px-1.5 text-[10px]">current</Badge>}
                     </div>
                   )}
                   <p className="mt-0.5 truncate text-xs text-muted-foreground">
@@ -294,9 +314,9 @@ export default function WorkspacesPage() {
                 </div>
 
                 <div className="flex shrink-0 items-center gap-1">
-                  {!r.active && (
-                    <Button size="sm" variant="outline" onClick={() => switchTo(r.id)}>
-                      Set active
+                  {!isCurrent && (
+                    <Button size="sm" variant="outline" disabled={busy === `switch-${r.id}`} onClick={() => switchTo(r.id)}>
+                      {busy === `switch-${r.id}` ? "Switching…" : "Switch to"}
                     </Button>
                   )}
                   <Button size="icon" variant="ghost" className="size-8 text-muted-foreground" title="Rename" onClick={() => setEditing({ id: r.id, name: r.name })}>
@@ -324,7 +344,8 @@ export default function WorkspacesPage() {
                   </AlertDialog>
                 </div>
               </Card>
-            ))
+              );
+            })
           )}
         </section>
       </div>
