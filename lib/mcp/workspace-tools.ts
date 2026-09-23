@@ -10,7 +10,7 @@ import { listRepos, getActive, vaultDirFor, type Repo } from "@/lib/repos";
 import { isAllowed } from "@/lib/auth";
 import { listNotes } from "@/lib/vault/store";
 import { selectWorkspace, getSelectedWorkspace, clearSelectedWorkspace } from "./workspace-session";
-import { syncStatus } from "@/lib/git";
+import { getLastSyncError } from "@/lib/git";
 
 /**
  * Workspace management tools for MCP callers.
@@ -85,6 +85,9 @@ function repoToWorkspaceInfo(
     }
   }
 
+  // Get sync error (cheap - no git calls)
+  const syncError = getLastSyncError(dir);
+
   return {
     id: r.id,
     name: r.name,
@@ -95,6 +98,7 @@ function repoToWorkspaceInfo(
     current: r.id === currentWorkspaceId,
     ...(noteCount !== undefined ? { noteCount } : {}),
     ...(cloneStatus ? { cloneStatus } : {}),
+    ...(syncError ? { syncError } : {}),
   };
 }
 
@@ -201,10 +205,10 @@ export async function switchToWorkspace(
       }
       warning += "You can still write notes here.";
 
-      // Check sync status for any errors
-      const status = await syncStatus(dir);
-      if ("lastError" in status && status.lastError) {
-        warning += ` Last sync error: ${status.lastError}`;
+      // Check sync status for any errors (cheap - no git calls)
+      const lastError = getLastSyncError(dir);
+      if (lastError) {
+        warning += ` Last sync error: ${lastError}`;
       }
 
       return { ok: true, workspaceId, name: repo.name, warning };

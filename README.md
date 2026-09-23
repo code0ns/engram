@@ -320,6 +320,15 @@ When you connect an empty repo (no commits), the clone succeeds but the workspac
 `brain_workspaces` shows such workspaces with `cloneStatus: "empty"`. Create notes with `brain_write`,
 or push content to the GitHub repo and wait for the next sync (or trigger one via the dashboard).
 
+**Notes show in the UI but GitHub stays empty / sync errors**
+If notes appear in the Engram dashboard but the GitHub repo has no commits:
+1. Check `brain_workspaces` — look for `syncError` on the workspace
+2. Common causes: token lacks push access, repo was deleted, branch protection rules
+3. Engram now handles first-push to empty repos automatically (with `-u` to set tracking)
+4. **Operator recovery**: SSH into the Railway container, `cd /data/vaults/<workspace-id>`, and
+   `git push -u origin main --force` to push local notes to GitHub. Then reconnect the workspace
+   in the UI if needed.
+
 ## Contributing
 
 Issues and PRs welcome — especially where the validity model breaks against a vault shaped
