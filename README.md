@@ -211,13 +211,25 @@ because there is nothing listening. It now refuses to start on a PaaS and tells 
 
 ## MCP tools
 
-Agents only ever see the active vault — no repo, workspace, or GitHub tools are exposed.
 A `read`-scope token sees only the read tools. `brain_capture` appears only when the Curator is `full`.
 
 | | Tools |
 |---|---|
-| **Read** | `brain_search` · `brain_read` · `brain_list` · `brain_recent` · `brain_tree` · `brain_backlinks` · `brain_graph` · `brain_schema` |
-| **Write** (needs a `write`-scope token) | `brain_write` · `brain_edit` · `brain_append` · `brain_move` · `brain_supersede` · `brain_create_folder` · `brain_delete` |
+| **Read** | `brain_search` · `brain_read` · `brain_list` · `brain_recent` · `brain_tree` · `brain_backlinks` · `brain_graph` · `brain_schema` · `brain_workspaces` |
+| **Write** (needs a `write`-scope token) | `brain_write` · `brain_edit` · `brain_append` · `brain_move` · `brain_supersede` · `brain_create_folder` · `brain_delete` · `brain_use_workspace` |
+
+### Multi-workspace for agents
+
+When multiple vaults are connected, agents can discover and switch between them without reconnecting:
+
+- **`brain_workspaces`** — list all workspaces this token can access, with id, name, note count, and
+  whether each is the current session's workspace or the global active one.
+- **`brain_use_workspace`** — switch to a different workspace for subsequent calls in this session.
+  Uses a per-session selection (1h TTL) so switching doesn't steal the dashboard user's active workspace.
+
+A shared `MCP_TOKEN` (operator full access) can see and switch between all connected workspaces. A
+scoped named token sees only the workspaces it was minted for. Agents should call `brain_workspaces`
+first when working across vaults.
 
 Connect an agent (the dashboard → **Connect** page shows the exact command + token):
 
@@ -297,6 +309,16 @@ full history.
 
 **Where does it run / is it self-hosted?**
 You host it. One Docker container on Railway / Render / Fly / any VM with a volume. Your keys, your data.
+
+**My agent connects to the wrong workspace / can't see another vault**
+Call `brain_workspaces` first to list what's accessible. A shared `MCP_TOKEN` sees all connected vaults;
+a scoped token only sees its assigned ones. Use `brain_use_workspace(id)` to switch — changes take effect
+for subsequent calls in that session without affecting the dashboard's global active workspace.
+
+**I connected an empty GitHub repo and now my agent sees no notes**
+When you connect an empty repo (no commits), the clone succeeds but the workspace has no content.
+`brain_workspaces` shows such workspaces with `cloneStatus: "empty"`. Create notes with `brain_write`,
+or push content to the GitHub repo and wait for the next sync (or trigger one via the dashboard).
 
 ## Contributing
 
