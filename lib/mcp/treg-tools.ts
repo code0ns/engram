@@ -15,6 +15,7 @@ import {
   balance,
   TREG_MAX_USD_PER_CALL,
   logTregCall,
+  type HttpMethod,
 } from "@/lib/treg";
 import type { Tool, ToolCtx } from "./tools";
 
@@ -108,23 +109,30 @@ export const TREG_TOOLS: Tool[] = [
     description:
       `Call a Treg endpoint. THIS COSTS MONEY — the Engram operator's Treg balance is charged. ` +
       `Calls exceeding $${TREG_MAX_USD_PER_CALL.toFixed(4)} are refused; ask the operator for approval or to raise TREG_MAX_USD_PER_CALL. ` +
-      `Always use tool_get first to confirm the price and required parameters.`,
+      `Always use tool_get first to confirm the price and required parameters. ` +
+      `The HTTP method (GET/POST) is determined from the catalog; for GET endpoints, params are sent as query string, not JSON body.`,
     inputSchema: {
       type: "object",
       properties: {
         endpoint_id: s("The endpoint ID to call"),
         params: { type: "object", description: "Parameters for the endpoint (see tool_get for schema)" },
         estimated_usd: { type: "number", description: "Expected cost from tool_get — used to enforce the spending cap" },
+        method: {
+          type: "string",
+          enum: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+          description: "Override HTTP method (optional — normally auto-detected from catalog)",
+        },
       },
       required: ["endpoint_id", "params"],
     },
-    handler: async ({ endpoint_id, params, estimated_usd }: Args, _ctx: ToolCtx) => {
+    handler: async ({ endpoint_id, params, estimated_usd, method }: Args, _ctx: ToolCtx) => {
       const eid = String(endpoint_id);
       const p = typeof params === "object" && params !== null ? params : {};
       const est = typeof estimated_usd === "number" ? estimated_usd : undefined;
+      const methodOverride = typeof method === "string" ? (method.toUpperCase() as HttpMethod) : undefined;
 
       try {
-        const result = await call(eid, p, est);
+        const result = await call(eid, p, { estimatedUsd: est, method: methodOverride });
         logTregCall("call", { endpointId: eid, usdEstimate: est, success: true });
         return {
           data: result.data,

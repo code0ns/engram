@@ -93,6 +93,17 @@ describe("Treg tool schemas", () => {
     expect(schema.properties).toHaveProperty("estimated_usd");
   });
 
+  test("tool_call has optional method override parameter", () => {
+    const schema = TREG_TOOL_MAP.get("tool_call")?.inputSchema as {
+      required?: string[];
+      properties?: Record<string, { type?: string; enum?: string[]; description?: string }>;
+    };
+    expect(schema.properties).toHaveProperty("method");
+    expect(schema.properties?.method?.type).toBe("string");
+    expect(schema.properties?.method?.enum).toEqual(["GET", "POST", "PUT", "PATCH", "DELETE"]);
+    expect(schema.required).not.toContain("method");
+  });
+
   test("tool_balance has no required parameters", () => {
     const schema = TREG_TOOL_MAP.get("tool_balance")?.inputSchema as {
       required?: string[];
@@ -109,9 +120,22 @@ describe("price cap enforcement", () => {
   });
 
   test("tool_get warns about expensive endpoints in its hint", async () => {
-    // This tests the static structure — the dynamic behavior is tested with mocks
     const tool = TREG_TOOL_MAP.get("tool_get");
     expect(tool?.description).toContain("price");
+  });
+});
+
+describe("HTTP method handling", () => {
+  test("tool_call description mentions HTTP method selection", () => {
+    const desc = TREG_TOOL_MAP.get("tool_call")?.description ?? "";
+    expect(desc).toContain("GET");
+    expect(desc).toContain("POST");
+    expect(desc).toContain("query string");
+  });
+
+  test("tool_call description mentions auto-detection from catalog", () => {
+    const desc = TREG_TOOL_MAP.get("tool_call")?.description ?? "";
+    expect(desc).toContain("catalog");
   });
 });
 
