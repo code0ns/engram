@@ -202,6 +202,17 @@ export default function ConnectPage() {
     mutate("/api/features");
   }
 
+  async function updateWorkspace(id: string, newWorkspaceId: string) {
+    const res = await fetch(`/api/tokens/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspaceId: newWorkspaceId }),
+    });
+    if (res.ok) {
+      mutate("/api/tokens");
+    }
+  }
+
   const tokens = tokData?.tokens ?? [];
   const repoName = (id?: string) => (id ? repos.find((r) => r.id === id)?.name : undefined);
   const fieldProps = { newName, setNewName, scope, setScope, repos, workspaceId, setWorkspaceId, creating, onCreate: create };
@@ -274,7 +285,25 @@ export default function ConnectPage() {
                         </span>
                       </td>
                       <td className="hidden px-3 py-2 sm:table-cell">
-                        {t.workspaceId ? (
+                        {repos.length > 0 ? (
+                          <Select
+                            value={t.workspaceId || ""}
+                            onValueChange={(val) => updateWorkspace(t.id, val)}
+                          >
+                            <SelectTrigger className="h-7 w-40 text-xs">
+                              <SelectValue placeholder="Select workspace">
+                                {t.workspaceId ? (repoName(t.workspaceId) ?? "(deleted)") : "unscoped — legacy"}
+                              </SelectValue>
+                            </SelectTrigger>
+                            <SelectContent>
+                              {repos.map((r) => (
+                                <SelectItem key={r.id} value={r.id} className="text-xs">
+                                  {r.name}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        ) : t.workspaceId ? (
                           <span className="text-xs">{repoName(t.workspaceId) ?? "(deleted)"}</span>
                         ) : (
                           <span className="text-xs text-muted-foreground">unscoped — legacy</span>

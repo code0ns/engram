@@ -93,6 +93,17 @@ export function revokeToken(id: string): void {
   save(load().filter((t) => t.id !== id));
 }
 
+/** Update a token's workspace assignment. */
+export function updateToken(id: string, workspaceId: string): TokenMeta | null {
+  const all = load();
+  const idx = all.findIndex((t) => t.id === id);
+  if (idx === -1) return null;
+  all[idx].workspaceId = workspaceId || undefined;
+  save(all);
+  const t = all[idx];
+  return { id: t.id, name: t.name, created: t.created, scope: scopeOf(t), workspaceId: t.workspaceId };
+}
+
 /** Resolve a bearer token to its identity + scope, or null when unknown. */
 export function resolveToken(bearer: string): TokenMeta | null {
   if (!bearer) return null;
