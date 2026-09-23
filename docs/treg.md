@@ -63,6 +63,26 @@ Call an endpoint through Treg. **This costs money.**
 - Pass `estimated_usd` (from `tool_get`) to enforce the spending cap
 - Returns `data`, `call_id`, and `usd_charged`
 
+#### HTTP Method Selection
+
+The HTTP method (GET, POST, etc.) is automatically determined from the catalog's `call_template`:
+
+- **GET endpoints** (like Diffbot): `params` are sent as a query string
+- **POST endpoints** (like AnyAPI): `params` are sent as a JSON body
+
+This is automatic — you don't need to specify the method. If you need to override it (e.g., for
+an endpoint with incorrect catalog metadata), pass `method`:
+
+```json
+{
+  "endpoint_id": "some-endpoint",
+  "params": { "url": "https://example.com" },
+  "method": "GET"
+}
+```
+
+Valid methods: `GET`, `POST`, `PUT`, `PATCH`, `DELETE`.
+
 ### `tool_balance` (write scope)
 Check the Treg account balance.
 
@@ -86,6 +106,8 @@ cannot see `brain_write` or `brain_delete`.
 
 ## Example Agent Flow
 
+### POST endpoint (most endpoints)
+
 ```
 Agent: I need to look up company info for "acme.com"
 
@@ -93,11 +115,30 @@ Agent: I need to look up company info for "acme.com"
    → Returns: company-enrichment-v1 @ $0.002/call, reliability 98%
 
 2. tool_get("company-enrichment-v1")
-   → Returns: params { domain: string }, price $0.002, full response schema
+   → Returns: params { domain: string }, price $0.002, call_template with --method POST
 
 3. tool_call("company-enrichment-v1", { domain: "acme.com" }, 0.002)
+   → Sends: POST /call/company-enrichment-v1 with JSON body { domain: "acme.com" }
    → Returns: { data: { name: "Acme Corp", employees: 500, ... }, usd_charged: 0.002 }
 ```
+
+### GET endpoint (like Diffbot)
+
+```
+Agent: I need to extract the article from https://example.com/article
+
+1. tool_search("extract article from url")
+   → Returns: diffbot.x.extract-article @ $0.001/call
+
+2. tool_get("diffbot.x.extract-article")
+   → Returns: params { url: string }, call_template with --method GET
+
+3. tool_call("diffbot.x.extract-article", { url: "https://example.com/article" }, 0.001)
+   → Sends: GET /call/diffbot.x.extract-article?url=https://example.com/article
+   → Returns: { data: { title: "...", text: "...", ... }, usd_charged: 0.001 }
+```
+
+The HTTP method is auto-detected from the catalog — you don't need to specify it.
 
 ## Spending Cap
 

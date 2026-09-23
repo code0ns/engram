@@ -9,6 +9,13 @@
  *   TREG_MAX_USD_PER_CALL — Maximum cost per tool_call (default: 0.01)
  *
  * When TREG_TOKEN is unset, Treg tools are hidden from the MCP surface entirely.
+ *
+ * HTTP method selection:
+ *   Treg endpoints can be GET or POST (or other methods). The catalog's `call_template`
+ *   field indicates the method (e.g., `--method GET`). We parse this and use the correct
+ *   method when calling endpoints:
+ *   - GET endpoints: params go in the query string
+ *   - POST/PUT/PATCH endpoints: params go in the request body as JSON
  */
 
 /** Treg API base URL. */
@@ -36,6 +43,57 @@ export function tregEnabled(): boolean {
 /** Get the token for internal use only — never expose this to MCP responses. */
 export function getTregToken(): string {
   return TREG_TOKEN;
+}
+
+// ── HTTP Method Handling ───────────────────────────────────────────────────────
+
+export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+
+const BODY_METHODS: HttpMethod[] = ["POST", "PUT", "PATCH"];
+
+/**
+ * Extract the HTTP method from a Treg catalog `call_template` string.
+ * Templates look like: `treg call endpoint-id --method GET --url "..." ...`
+ * Returns undefined if no method is specified (defaults to POST for body, GET otherwise).
+ */
+export function extractMethodFromTemplate(callTemplate: string | undefined): HttpMethod | undefined {
+  if (!callTemplate) return undefined;
+  const match = callTemplate.match(/--method\s+(\w+)/i);
+  if (!match) return undefined;
+  const method = match[1].toUpperCase();
+  if (["GET", "POST", "PUT", "PATCH", "DELETE"].includes(method)) {
+    return method as HttpMethod;
+  }
+  return undefined;
+}
+
+/**
+ * In-process cache for endpoint HTTP methods. Avoids repeated catalog lookups
+ * for the same endpoint during a session. Key = endpoint_id, value = method.
+ */
+const endpointMethodCache = new Map<string, HttpMethod>();
+
+/**
+ * Get the HTTP method for an endpoint. Uses cache, falls back to catalog lookup.
+ * Returns "POST" as default if method cannot be determined (backward compatible).
+ */
+export async function getEndpointMethod(endpointId: string): Promise<HttpMethod> {
+  const cached = endpointMethodCache.get(endpointId);
+  if (cached) return cached;
+
+  try {
+    const info = await catalogGet(endpointId);
+    const method = extractMethodFromTemplate(info.call_template) ?? "POST";
+    endpointMethodCache.set(endpointId, method);
+    return method;
+  } catch {
+    return "POST";
+  }
+}
+
+/** Clear the endpoint method cache (useful for testing). */
+export function clearEndpointMethodCache(): void {
+  endpointMethodCache.clear();
 }
 
 // ── HTTP Client ────────────────────────────────────────────────────────────────
@@ -233,9 +291,9 @@ export interface TregBalanceResult {
 }
 
 interface TregFetchOptions {
-  method?: "GET" | "POST";
+  method?: HttpMethod;
   body?: Record<string, unknown>;
-  query?: Record<string, string | number | undefined>;
+  query?: Record<string, string | number | boolean | undefined>;
 }
 
 async function tregFetch<T>(endpoint: string, options: TregFetchOptions = {}): Promise<T> {
@@ -298,14 +356,37 @@ export async function catalogGet(endpointId: string): Promise<TregCatalogGetResu
 }
 
 /**
+ * Options for calling a Treg endpoint.
+ */
+export interface TregCallOptions {
+  /** Explicit HTTP method override. If not provided, looks up from catalog. */
+  method?: HttpMethod;
+  /** Expected cost from tool_get — used to enforce the spending cap. */
+  estimatedUsd?: number;
+}
+
+/**
  * Call an endpoint through Treg. COSTS MONEY — write-scope only.
  * Refuses if the endpoint's cost exceeds TREG_MAX_USD_PER_CALL.
+ *
+ * HTTP method selection:
+ * - If `options.method` is provided, uses that
+ * - Otherwise, looks up the method from the catalog (cached per endpoint)
+ * - GET/DELETE: params are passed as query string
+ * - POST/PUT/PATCH: params are passed as JSON body
  */
 export async function call(
   endpointId: string,
   params: Record<string, unknown>,
-  estimatedUsd?: number,
+  estimatedUsdOrOptions?: number | TregCallOptions,
 ): Promise<TregCallResult> {
+  const options: TregCallOptions =
+    typeof estimatedUsdOrOptions === "number"
+      ? { estimatedUsd: estimatedUsdOrOptions }
+      : estimatedUsdOrOptions ?? {};
+
+  const { estimatedUsd } = options;
+
   if (estimatedUsd !== undefined && estimatedUsd > TREG_MAX_USD_PER_CALL) {
     throw new Error(
       `Refusing tool_call: estimated cost $${estimatedUsd.toFixed(4)} exceeds the cap of $${TREG_MAX_USD_PER_CALL.toFixed(4)}. ` +
@@ -313,10 +394,14 @@ export async function call(
     );
   }
 
-  const hasBody = Object.keys(params).length > 0;
+  const method = options.method ?? (await getEndpointMethod(endpointId));
+  const hasParams = Object.keys(params).length > 0;
+  const useBody = BODY_METHODS.includes(method);
+
   const res = await tregFetch<unknown>(`/call/${encodeURIComponent(endpointId)}`, {
-    method: hasBody ? "POST" : "GET",
-    body: hasBody ? params : undefined,
+    method,
+    body: useBody && hasParams ? params : undefined,
+    query: !useBody && hasParams ? (params as Record<string, string | number | boolean | undefined>) : undefined,
   });
 
   return { data: res };
