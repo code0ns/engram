@@ -9,7 +9,6 @@ import { fetcher } from "@/lib/client";
 interface Repo {
   id: string;
   name: string;
-  active: boolean;
 }
 interface Sync {
   enabled: boolean;
@@ -21,15 +20,17 @@ interface Sync {
 }
 
 export function WorkspaceSwitcher() {
-  const { data } = useSWR<{ repos: Repo[]; active: Repo | null }>("/api/repos", fetcher);
+  const { data } = useSWR<{ repos: Repo[]; currentWorkspaceId: string | null }>("/api/repos", fetcher);
   const { data: sync } = useSWR<Sync>("/api/sync", fetcher, { refreshInterval: 10000 });
   const { mutate } = useSWRConfig();
   const [open, setOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
   const repos = data?.repos ?? [];
-  const activeName = data?.active?.name ?? "Sample vault";
-  const hasRemote = !!data?.active;
+  const currentWorkspaceId = data?.currentWorkspaceId ?? null;
+  const currentWorkspace = repos.find((r) => r.id === currentWorkspaceId);
+  const activeName = currentWorkspace?.name ?? "Sample vault";
+  const hasRemote = !!currentWorkspace;
 
   // Live git status line — makes "it's a git repo" a constant truth, not a hidden setting.
   const branch = sync?.branch || "main";
@@ -99,7 +100,7 @@ export function WorkspaceSwitcher() {
                 onClick={() => switchTo(r.id)}
                 className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs transition-colors hover:bg-accent"
               >
-                <Check size={12} className={r.active ? "opacity-100" : "opacity-0"} />
+                <Check size={12} className={r.id === currentWorkspaceId ? "opacity-100" : "opacity-0"} />
                 <span className="truncate">{r.name}</span>
               </button>
             ))}
