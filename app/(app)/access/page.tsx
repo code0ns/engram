@@ -50,7 +50,7 @@ interface TokenMeta {
   id: string;
   name: string;
   scope: "read" | "write";
-  workspaceId?: string;
+  workspaceIds: string[];
 }
 
 function refresh(mutate: (key: string) => unknown) {
@@ -310,10 +310,19 @@ export default function AccessPage() {
                         </span>
                       </td>
                       <td className="px-3 py-2">
-                        {t.workspaceId ? (
-                          <span className="text-xs">{repoName(t.workspaceId) ?? "(deleted workspace)"}</span>
-                        ) : (
+                        {t.workspaceIds.length === 0 ? (
                           <Badge variant="outline" className="h-5 px-1.5 text-[10px] text-muted-foreground">unscoped — legacy</Badge>
+                        ) : (
+                          <div className="flex flex-wrap gap-1">
+                            {t.workspaceIds.slice(0, 2).map((id) => (
+                              <span key={id} className="rounded bg-muted px-1.5 py-0.5 text-[10px]">
+                                {repoName(id) ?? "(deleted)"}
+                              </span>
+                            ))}
+                            {t.workspaceIds.length > 2 && (
+                              <span className="text-[10px] text-muted-foreground">+{t.workspaceIds.length - 2}</span>
+                            )}
+                          </div>
                         )}
                       </td>
                     </tr>

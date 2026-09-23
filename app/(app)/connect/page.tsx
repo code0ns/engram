@@ -38,11 +38,48 @@ interface TokenMeta {
   name: string;
   created: string;
   scope: TokenScope;
-  workspaceId?: string;
+  workspaceIds: string[];
 }
 interface Repo {
   id: string;
   name: string;
+}
+
+/** Checkbox list of workspaces for token creation/editing. */
+function WorkspacePicker({ 
+  repos, 
+  selected, 
+  onChange,
+  compact = false,
+}: { 
+  repos: Repo[]; 
+  selected: string[]; 
+  onChange: (ids: string[]) => void;
+  compact?: boolean;
+}) {
+  if (repos.length === 0) {
+    return <p className="text-xs text-muted-foreground">No workspaces available.</p>;
+  }
+  return (
+    <div className={cn(
+      "divide-y divide-border overflow-y-auto rounded-lg border border-border",
+      compact ? "max-h-32" : "max-h-40"
+    )}>
+      {repos.map((r) => {
+        const on = selected.includes(r.id);
+        return (
+          <label key={r.id} className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm hover:bg-accent/50">
+            <input
+              type="checkbox"
+              checked={on}
+              onChange={() => onChange(on ? selected.filter((id) => id !== r.id) : [...selected, r.id])}
+            />
+            {r.name}
+          </label>
+        );
+      })}
+    </div>
+  );
 }
 
 /** The name + scope + workspace + create controls, shared by the inline (desktop) and dialog (mobile) forms. */
@@ -52,8 +89,8 @@ function TokenFields({
   scope,
   setScope,
   repos,
-  workspaceId,
-  setWorkspaceId,
+  workspaceIds,
+  setWorkspaceIds,
   creating,
   onCreate,
   className,
@@ -63,8 +100,8 @@ function TokenFields({
   scope: TokenScope;
   setScope: (s: TokenScope) => void;
   repos: Repo[];
-  workspaceId: string;
-  setWorkspaceId: (id: string) => void;
+  workspaceIds: string[];
+  setWorkspaceIds: (ids: string[]) => void;
   creating: boolean;
   onCreate: () => void;
   className?: string;
@@ -102,7 +139,7 @@ function TokenFields({
           </div>
           <button
             onClick={onCreate}
-            disabled={creating}
+            disabled={creating || (repos.length > 0 && workspaceIds.length === 0)}
             className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50"
           >
             {creating ? "Creating…" : "Create"}
@@ -110,16 +147,10 @@ function TokenFields({
         </div>
       </div>
       {repos.length > 0 && (
-        <Select value={workspaceId} onValueChange={setWorkspaceId}>
-          <SelectTrigger className="w-full sm:w-56">
-            <SelectValue placeholder="Workspace" />
-          </SelectTrigger>
-          <SelectContent>
-            {repos.map((r) => (
-              <SelectItem key={r.id} value={r.id}>{r.name}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <div className="space-y-1.5">
+          <p className="text-xs text-muted-foreground">Select workspaces this token can access:</p>
+          <WorkspacePicker repos={repos} selected={workspaceIds} onChange={setWorkspaceIds} />
+        </div>
       )}
     </div>
   );
@@ -139,12 +170,13 @@ export default function ConnectPage() {
   const [creating, setCreating] = useState(false);
   const [justCreated, setJustCreated] = useState<{ name: string; token: string } | null>(null);
   const [scope, setScope] = useState<TokenScope>("write");
-  const [workspaceId, setWorkspaceId] = useState("");
+  const [workspaceIds, setWorkspaceIds] = useState<string[]>([]);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [agent, setAgent] = useState("claude-code");
+  const [editingToken, setEditingToken] = useState<{ id: string; workspaceIds: string[] } | null>(null);
 
   useEffect(() => {
-    if (repos.length > 0 && !workspaceId) setWorkspaceId(repos[0].id);
+    if (repos.length > 0 && workspaceIds.length === 0) setWorkspaceIds([repos[0].id]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [repos]);
 
@@ -183,7 +215,7 @@ export default function ConnectPage() {
       const res = await fetch("/api/tokens", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: newName.trim() || "token", scope, workspaceId: workspaceId || undefined }),
+        body: JSON.stringify({ name: newName.trim() || "token", scope, workspaceIds: workspaceIds.length > 0 ? workspaceIds : undefined }),
       });
       const d = await res.json();
       if (d.token) setJustCreated({ name: d.name, token: d.token });
@@ -202,20 +234,21 @@ export default function ConnectPage() {
     mutate("/api/features");
   }
 
-  async function updateWorkspace(id: string, newWorkspaceId: string) {
+  async function updateWorkspaces(id: string, newWorkspaceIds: string[]) {
     const res = await fetch(`/api/tokens/${id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ workspaceId: newWorkspaceId }),
+      body: JSON.stringify({ workspaceIds: newWorkspaceIds }),
     });
     if (res.ok) {
       mutate("/api/tokens");
+      setEditingToken(null);
     }
   }
 
   const tokens = tokData?.tokens ?? [];
   const repoName = (id?: string) => (id ? repos.find((r) => r.id === id)?.name : undefined);
-  const fieldProps = { newName, setNewName, scope, setScope, repos, workspaceId, setWorkspaceId, creating, onCreate: create };
+  const fieldProps = { newName, setNewName, scope, setScope, repos, workspaceIds, setWorkspaceIds, creating, onCreate: create };
 
   return (
     <div className="scrollbar-none h-full overflow-y-auto">
@@ -285,29 +318,61 @@ export default function ConnectPage() {
                         </span>
                       </td>
                       <td className="hidden px-3 py-2 sm:table-cell">
-                        {repos.length > 0 ? (
-                          <Select
-                            value={t.workspaceId || ""}
-                            onValueChange={(val) => updateWorkspace(t.id, val)}
-                          >
-                            <SelectTrigger className="h-7 w-40 text-xs">
-                              <SelectValue placeholder="Select workspace">
-                                {t.workspaceId ? (repoName(t.workspaceId) ?? "(deleted)") : "unscoped — legacy"}
-                              </SelectValue>
-                            </SelectTrigger>
-                            <SelectContent>
-                              {repos.map((r) => (
-                                <SelectItem key={r.id} value={r.id} className="text-xs">
-                                  {r.name}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        ) : t.workspaceId ? (
-                          <span className="text-xs">{repoName(t.workspaceId) ?? "(deleted)"}</span>
-                        ) : (
-                          <span className="text-xs text-muted-foreground">unscoped — legacy</span>
-                        )}
+                        <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap gap-1">
+                            {t.workspaceIds.length === 0 ? (
+                              <span className="text-xs text-muted-foreground">unscoped — legacy</span>
+                            ) : (
+                              t.workspaceIds.slice(0, 2).map((id) => (
+                                <span key={id} className="rounded bg-muted px-1.5 py-0.5 text-[10px]">
+                                  {repoName(id) ?? "(deleted)"}
+                                </span>
+                              ))
+                            )}
+                            {t.workspaceIds.length > 2 && (
+                              <span className="text-[10px] text-muted-foreground">+{t.workspaceIds.length - 2}</span>
+                            )}
+                          </div>
+                          {repos.length > 0 && (
+                            <Dialog
+                              open={editingToken?.id === t.id}
+                              onOpenChange={(o) => setEditingToken(o ? { id: t.id, workspaceIds: t.workspaceIds } : null)}
+                            >
+                              <DialogTrigger asChild>
+                                <button className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground">
+                                  Edit
+                                </button>
+                              </DialogTrigger>
+                              <DialogContent>
+                                <DialogHeader>
+                                  <DialogTitle>Edit workspaces for {t.name}</DialogTitle>
+                                </DialogHeader>
+                                {editingToken && (
+                                  <WorkspacePicker
+                                    repos={repos}
+                                    selected={editingToken.workspaceIds}
+                                    onChange={(ids) => setEditingToken({ id: t.id, workspaceIds: ids })}
+                                  />
+                                )}
+                                <div className="flex justify-end gap-2">
+                                  <button
+                                    onClick={() => setEditingToken(null)}
+                                    className="rounded-md px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground"
+                                  >
+                                    Cancel
+                                  </button>
+                                  <button
+                                    onClick={() => editingToken && updateWorkspaces(t.id, editingToken.workspaceIds)}
+                                    disabled={!editingToken || editingToken.workspaceIds.length === 0}
+                                    className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50"
+                                  >
+                                    Save
+                                  </button>
+                                </div>
+                              </DialogContent>
+                            </Dialog>
+                          )}
+                        </div>
                       </td>
                       <td className="hidden px-3 py-2 text-muted-foreground sm:table-cell">{new Date(t.created).toLocaleDateString()}</td>
                       <td className="px-3 py-2 text-right">

@@ -26,12 +26,16 @@ interface StoredToken {
   /** Absent on tokens created before scopes existed — those are grandfathered as `write`. */
   scope?: TokenScope;
   /**
-   * The workspace this token is pinned to. Absent on tokens created before workspace
+   * The workspaces this token can access. Absent on tokens created before workspace
    * permissions existed — those are resolved to the legacy global default workspace by
    * lib/workspace-resolve.ts and shown as "unscoped — legacy" in the UI, so nothing that
    * already worked silently breaks.
+   * 
+   * Legacy: `workspaceId` (singular) is still read for backward compatibility but new
+   * tokens always use `workspaceIds` (plural).
    */
   workspaceId?: string;
+  workspaceIds?: string[];
 }
 
 export interface TokenMeta {
@@ -39,7 +43,8 @@ export interface TokenMeta {
   name: string;
   created: string;
   scope: TokenScope;
-  workspaceId?: string;
+  /** Array of workspace IDs this token can access. Empty array means unscoped (legacy). */
+  workspaceIds: string[];
 }
 
 const hash = (t: string) => crypto.createHash("sha256").update(t).digest("hex");
@@ -64,44 +69,54 @@ function save(tokens: StoredToken[]) {
 /** Tokens minted before scopes existed keep the behaviour they had: full access. */
 const scopeOf = (t: StoredToken): TokenScope => t.scope ?? "write";
 
+/** Normalize workspace IDs from legacy single or new array format. */
+function workspaceIdsOf(t: StoredToken): string[] {
+  if (t.workspaceIds && t.workspaceIds.length > 0) return t.workspaceIds;
+  if (t.workspaceId) return [t.workspaceId];
+  return [];
+}
+
 export function listTokens(): TokenMeta[] {
-  return load().map((t) => ({ id: t.id, name: t.name, created: t.created, scope: scopeOf(t), workspaceId: t.workspaceId }));
+  return load().map((t) => ({ id: t.id, name: t.name, created: t.created, scope: scopeOf(t), workspaceIds: workspaceIdsOf(t) }));
 }
 
 /** Create a token. Returns the plaintext value ONCE — only the hash is stored. */
 export function createToken(
   name: string,
   scope: TokenScope = "write",
-  workspaceId?: string,
-): { id: string; name: string; scope: TokenScope; workspaceId?: string; token: string } {
+  workspaceIds?: string[],
+): { id: string; name: string; scope: TokenScope; workspaceIds: string[]; token: string } {
   const token = crypto.randomBytes(32).toString("hex");
+  const ids = workspaceIds?.filter(Boolean) ?? [];
   const rec: StoredToken = {
     id: crypto.randomUUID(),
     name: name?.trim() || "token",
     hash: hash(token),
     created: new Date().toISOString(),
     scope: scope === "read" ? "read" : "write",
-    workspaceId: workspaceId || undefined,
+    workspaceIds: ids.length > 0 ? ids : undefined,
   };
   const all = load();
   all.push(rec);
   save(all);
-  return { id: rec.id, name: rec.name, scope: rec.scope!, workspaceId: rec.workspaceId, token };
+  return { id: rec.id, name: rec.name, scope: rec.scope!, workspaceIds: ids, token };
 }
 
 export function revokeToken(id: string): void {
   save(load().filter((t) => t.id !== id));
 }
 
-/** Update a token's workspace assignment. */
-export function updateToken(id: string, workspaceId: string): TokenMeta | null {
+/** Update a token's workspace assignments. */
+export function updateToken(id: string, workspaceIds: string[]): TokenMeta | null {
   const all = load();
   const idx = all.findIndex((t) => t.id === id);
   if (idx === -1) return null;
-  all[idx].workspaceId = workspaceId || undefined;
+  const ids = workspaceIds?.filter(Boolean) ?? [];
+  all[idx].workspaceIds = ids.length > 0 ? ids : undefined;
+  delete all[idx].workspaceId; // Clear legacy field
   save(all);
   const t = all[idx];
-  return { id: t.id, name: t.name, created: t.created, scope: scopeOf(t), workspaceId: t.workspaceId };
+  return { id: t.id, name: t.name, created: t.created, scope: scopeOf(t), workspaceIds: workspaceIdsOf(t) };
 }
 
 /** Resolve a bearer token to its identity + scope, or null when unknown. */
@@ -109,7 +124,7 @@ export function resolveToken(bearer: string): TokenMeta | null {
   if (!bearer) return null;
   const h = hash(bearer);
   const t = load().find((x) => x.hash === h);
-  return t ? { id: t.id, name: t.name, created: t.created, scope: scopeOf(t), workspaceId: t.workspaceId } : null;
+  return t ? { id: t.id, name: t.name, created: t.created, scope: scopeOf(t), workspaceIds: workspaceIdsOf(t) } : null;
 }
 
 export function hasAnyToken(): boolean {

@@ -12,26 +12,39 @@ export async function GET(req: Request) {
   const session = await getSession(req);
   if (!session || !isAllowed(session.email)) return Response.json({ error: "unauthorized" }, { status: 401 });
 
-  // Visible: pinned to one of the caller's granted workspaces, or unscoped-legacy tokens
+  // Visible: has at least one workspace the caller is granted, or unscoped-legacy tokens
   // (which resolve to the global default) — but only if the caller is granted THAT one.
   const granted = new Set(grantedWorkspacesFor(session.email).map((r) => r.id));
   const defaultId = getActive()?.id;
-  const visible = all.filter((t) => (t.workspaceId ? granted.has(t.workspaceId) : defaultId && granted.has(defaultId)));
+  const visible = all.filter((t) => {
+    if (t.workspaceIds.length === 0) return defaultId && granted.has(defaultId);
+    return t.workspaceIds.some((id) => granted.has(id));
+  });
   return Response.json({ tokens: visible });
 }
 
 export async function POST(req: Request) {
-  const { name, scope, workspaceId } = await req.json().catch(() => ({}));
+  const { name, scope, workspaceId, workspaceIds } = await req.json().catch(() => ({}));
   const enforced = dashboardAuthEnforced();
+
+  // Support both legacy single workspaceId and new workspaceIds array
+  let ids: string[] = [];
+  if (Array.isArray(workspaceIds)) {
+    ids = workspaceIds.filter((id): id is string => typeof id === "string");
+  } else if (typeof workspaceId === "string") {
+    ids = [workspaceId];
+  }
 
   if (enforced) {
     const session = await getSession(req);
     if (!session || !isAllowed(session.email)) return Response.json({ error: "unauthorized" }, { status: 401 });
-    if (!workspaceId || typeof workspaceId !== "string") {
-      return Response.json({ error: "workspaceId required" }, { status: 400 });
+    if (ids.length === 0) {
+      return Response.json({ error: "at least one workspaceId required" }, { status: 400 });
     }
-    if (!grantedWorkspacesFor(session.email).some((r) => r.id === workspaceId)) {
-      return Response.json({ error: "not granted" }, { status: 403 });
+    const grantedIds = new Set(grantedWorkspacesFor(session.email).map((r) => r.id));
+    const notGranted = ids.filter((id) => !grantedIds.has(id));
+    if (notGranted.length > 0) {
+      return Response.json({ error: `not granted to workspace(s): ${notGranted.join(", ")}` }, { status: 403 });
     }
   }
 
@@ -41,7 +54,7 @@ export async function POST(req: Request) {
     createToken(
       typeof name === "string" ? name : "token",
       scope === "read" ? "read" : "write",
-      typeof workspaceId === "string" ? workspaceId : undefined,
+      ids.length > 0 ? ids : undefined,
     ),
   );
 }

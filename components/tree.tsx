@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, createContext, useContext, useMemo, useCallback } from "react";
+import { useState, useEffect, createContext, useContext, useMemo, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import useSWR, { useSWRConfig } from "swr";
 import { Check, ChevronRight, FileText, Palette, Pencil, Pipette, Trash2, X, GripVertical } from "lucide-react";
@@ -407,13 +407,19 @@ interface TreeContextValue {
   isValidDropTarget: (targetPath: string) => boolean;
   colorData?: { colors: Record<string, string> };
   orderData?: { order: FolderOrder };
+  expandedFolders: Set<string>;
+  toggleFolder: (path: string) => void;
 }
 
 const TreeContext = createContext<TreeContextValue>({
   draggedItem: null,
   dropTarget: null,
   isValidDropTarget: () => false,
+  expandedFolders: new Set(),
+  toggleFolder: () => {},
 });
+
+const EXPANDED_FOLDERS_KEY = "engram-expanded-folders";
 
 function isDescendantOf(childPath: string, parentPath: string): boolean {
   if (!parentPath) return false;
@@ -427,8 +433,8 @@ function SortableDir({
   node: TreeNode; 
   depth: number;
 }) {
-  const { activePath, dropTarget, isValidDropTarget, colorData, orderData } = useContext(TreeContext);
-  const [open, setOpen] = useState(depth === 0);
+  const { activePath, dropTarget, isValidDropTarget, colorData, orderData, expandedFolders, toggleFolder } = useContext(TreeContext);
+  const open = expandedFolders.has(node.path);
   const [renaming, setRenaming] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [pickingColor, setPickingColor] = useState(false);
@@ -558,7 +564,7 @@ function SortableDir({
               type="button"
               onClick={(e) => {
                 e.stopPropagation();
-                setOpen((o) => !o);
+                toggleFolder(node.path);
               }}
               className="shrink-0"
               aria-label={open ? "Collapse folder" : "Expand folder"}
@@ -764,6 +770,34 @@ export function Tree({ tree, activePath }: { tree: TreeNode; activePath?: string
   const [draggedItem, setDraggedItem] = useState<DragItem | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
 
+  // Persist folder expansion state in localStorage
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(() => {
+    if (typeof window === "undefined") return new Set<string>();
+    try {
+      const stored = localStorage.getItem(EXPANDED_FOLDERS_KEY);
+      return stored ? new Set(JSON.parse(stored)) : new Set<string>();
+    } catch {
+      return new Set<string>();
+    }
+  });
+
+  const toggleFolder = useCallback((path: string) => {
+    setExpandedFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      try {
+        localStorage.setItem(EXPANDED_FOLDERS_KEY, JSON.stringify([...next]));
+      } catch {
+        // localStorage not available
+      }
+      return next;
+    });
+  }, []);
+
   const sensors = useSensors(
     useSensor(PointerSensor, {
       activationConstraint: {
@@ -916,7 +950,9 @@ export function Tree({ tree, activePath }: { tree: TreeNode; activePath?: string
     isValidDropTarget,
     colorData,
     orderData,
-  }), [activePath, draggedItem, dropTarget, isValidDropTarget, colorData, orderData]);
+    expandedFolders,
+    toggleFolder,
+  }), [activePath, draggedItem, dropTarget, isValidDropTarget, colorData, orderData, expandedFolders, toggleFolder]);
 
   const sortedRootChildren = useMemo(() => {
     if (!tree.children) return [];

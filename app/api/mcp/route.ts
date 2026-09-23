@@ -94,7 +94,7 @@ async function authenticate(token: string, authRequired: boolean): Promise<Calle
   if (!token) return null;
   if (MCP_TOKEN !== "" && token === MCP_TOKEN) return { name: "shared-token", scope: "write", workspace: { kind: "shared" } };
   const named = resolveToken(token);
-  if (named) return { name: named.name, scope: named.scope, workspace: { kind: "named", workspaceId: named.workspaceId } };
+  if (named) return { name: named.name, scope: named.scope, workspace: { kind: "named", workspaceIds: named.workspaceIds } };
   if (oauthEnabled()) {
     const at = await verifyAccessToken(token);
     if (at) return { name: "oauth", scope: "write", workspace: { kind: "oauth", email: at.sub } };
