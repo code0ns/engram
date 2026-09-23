@@ -11,8 +11,12 @@ Set these environment variables on Railway (or your host):
 |---|---|---|---|
 | `TREG_TOKEN` | Yes | — | Your Treg API token |
 | `TREG_BASE_URL` | No | `https://treg.to` | Treg API base URL |
-| `TREG_ORG_ID` | For balance | — | Treg org ID (per-org tokens bake this in) |
+| `TREG_ORG_ID` | For balance | — | Treg org ID **or team slug** (per-org tokens bake this in) |
 | `TREG_MAX_USD_PER_CALL` | No | `0.01` | Maximum cost per `tool_call` |
+
+> **Tip**: `TREG_ORG_ID` accepts either a numeric org ID (e.g. `12345`) or a team slug
+> (e.g. `harold-builds`). When a slug is provided, Engram resolves it to the numeric ID
+> by calling `GET /orgs` and caches the result for the server lifetime.
 
 When `TREG_TOKEN` is unset, the Treg tools are hidden from the MCP surface entirely — matching
 how `brain_capture` is hidden when the Curator is off.
