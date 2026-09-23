@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { TREG_TOOLS, TREG_TOOL_MAP } from "./treg-tools";
-import { isNumericOrgId, stringifyErrorField, clearOrgIdCache } from "@/lib/treg";
+import { isNumericOrgId, stringifyErrorField, clearOrgIdCache, extractOrgId } from "@/lib/treg";
 
 /**
  * Treg tool tests:
@@ -227,5 +227,56 @@ describe("Treg error stringification", () => {
     const result = stringifyErrorField(obj);
     expect(result).not.toContain("[object Object]");
     expect(result).toBe('{"nested":{"deep":true}}');
+  });
+});
+
+describe("Treg org ID extraction", () => {
+  test("extractOrgId returns org_id when present", () => {
+    expect(extractOrgId({ org_id: 123, slug: "test" })).toBe(123);
+    expect(extractOrgId({ org_id: 0, slug: "zero" })).toBe(0);
+  });
+
+  test("extractOrgId returns id when org_id is absent", () => {
+    expect(extractOrgId({ id: 456, slug: "test" })).toBe(456);
+    expect(extractOrgId({ id: 0, slug: "zero" })).toBe(0);
+  });
+
+  test("extractOrgId prefers org_id over id when both present", () => {
+    expect(extractOrgId({ org_id: 123, id: 456, slug: "test" })).toBe(123);
+  });
+
+  test("extractOrgId returns undefined when no numeric id field exists", () => {
+    expect(extractOrgId({ slug: "test", name: "Test Org" })).toBeUndefined();
+    expect(extractOrgId({})).toBeUndefined();
+  });
+
+  test("extractOrgId returns undefined for non-number id values", () => {
+    expect(extractOrgId({ id: "123" as unknown as number })).toBeUndefined();
+    expect(extractOrgId({ org_id: null as unknown as number })).toBeUndefined();
+  });
+
+  test("extractOrgId handles realistic Treg /orgs response shapes", () => {
+    const orgWithOrgId = { org_id: 42, slug: "harold-builds", name: "Harold Builds" };
+    const orgWithId = { id: 99, slug: "acme-corp", name: "Acme Corporation" };
+    const orgWithBoth = { org_id: 1, id: 2, slug: "mixed", name: "Mixed Fields" };
+
+    expect(extractOrgId(orgWithOrgId)).toBe(42);
+    expect(extractOrgId(orgWithId)).toBe(99);
+    expect(extractOrgId(orgWithBoth)).toBe(1);
+  });
+
+  test("extracted org ID is always an integer suitable for URL path", () => {
+    const orgs = [
+      { org_id: 123 },
+      { id: 456 },
+      { org_id: 789, id: 999 },
+    ];
+
+    for (const org of orgs) {
+      const id = extractOrgId(org);
+      expect(Number.isInteger(id)).toBe(true);
+      expect(`/orgs/${id}/balance`).not.toContain("undefined");
+      expect(`/orgs/${id}/balance`).toMatch(/^\/orgs\/\d+\/balance$/);
+    }
   });
 });
