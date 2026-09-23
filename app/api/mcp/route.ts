@@ -19,6 +19,8 @@ import {
   WORKSPACE_TOOLS,
   listAccessibleWorkspaces,
   switchToWorkspace,
+  getWorkspaceSyncStatus,
+  triggerWorkspaceSync,
 } from "@/lib/mcp/workspace-tools";
 
 export const dynamic = "force-dynamic";
@@ -119,6 +121,22 @@ async function handleMessage(
               out = { ok: false, error: "id is required" };
             } else {
               out = await switchToWorkspace(caller.workspace, workspaceId, setGlobalActive);
+            }
+          } else if (toolName === "brain_sync_status") {
+            // Sync status needs the effective workspace dir
+            const ws = resolveEffectiveWorkspace(caller);
+            if (!ws) {
+              out = { ok: false, error: "no workspace access for this token" };
+            } else {
+              out = await getWorkspaceSyncStatus(ws.dir);
+            }
+          } else if (toolName === "brain_sync") {
+            // Trigger sync needs the effective workspace dir
+            const ws = resolveEffectiveWorkspace(caller);
+            if (!ws) {
+              out = { ok: false, error: "no workspace access for this token" };
+            } else {
+              out = await triggerWorkspaceSync(ws.dir, `${caller.name}: MCP sync request`);
             }
           } else {
             out = { error: `unknown workspace tool: ${toolName}` };

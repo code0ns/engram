@@ -45,6 +45,14 @@ export interface WorkspaceInfo {
   cloneStatus?: "empty" | "missing";
   /** Last sync error for this workspace, if any. */
   syncError?: string;
+  /** True when the branch has no upstream tracking (common with empty remotes). */
+  noUpstream?: boolean;
+  /** True when the remote branch doesn't exist (empty GitHub repo). */
+  remoteEmpty?: boolean;
+  /** Number of local commits that haven't been pushed. */
+  unpushedCommits?: number;
+  /** Warning message about sync state. */
+  syncWarning?: string;
 }
 
 function repoToWorkspaceInfo(
@@ -244,7 +252,28 @@ export function clearWorkspaceSelection(): { ok: true } {
   return { ok: true };
 }
 
+import { syncStatus, syncNow } from "@/lib/git";
+
 const s = (description: string) => ({ type: "string", description });
+
+/**
+ * Get detailed sync status for a workspace directory.
+ * This is more expensive than getLastSyncError - it does git operations.
+ */
+export async function getWorkspaceSyncStatus(dir: string) {
+  return await syncStatus(dir);
+}
+
+/**
+ * Trigger a full sync (commit + push) for a workspace.
+ */
+export async function triggerWorkspaceSync(dir: string, reason: string = "MCP sync request") {
+  const result = await syncNow(dir, reason);
+  if (result === null) {
+    return { ok: false, error: "sync skipped - another operation in progress" };
+  }
+  return { ok: true, ...result };
+}
 
 export const WORKSPACE_TOOLS: WorkspaceTool[] = [
   {
@@ -270,6 +299,19 @@ export const WORKSPACE_TOOLS: WorkspaceTool[] = [
       required: ["id"],
     },
     write: true, // Modifies session state
+  },
+  {
+    name: "brain_sync_status",
+    description:
+      "Get detailed git sync status for the current workspace. Returns: enabled, dirty (uncommitted files), ahead/behind counts, branch name, pending sync reasons, and any lastError. IMPORTANT: Also detects the 'false green' scenario where the UI shows 'synced' but commits were never pushed — look for `noUpstream: true` (no tracking branch), `remoteEmpty: true` (GitHub repo has no commits), or `unpushed: true` with `localCommits > 0`. Use brain_sync to push.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "brain_sync",
+    description:
+      "Trigger a full sync (commit + push) for the current workspace. Use this to recover from the 'notes in UI but GitHub empty' scenario, or to force-push local changes. Returns the sync outcome: committed (true if changes were committed), pulled (true if remote changes were incorporated), pushed (true if push succeeded), and any error message.",
+    inputSchema: { type: "object", properties: {} },
+    write: true, // Modifies git state
   },
 ];
 

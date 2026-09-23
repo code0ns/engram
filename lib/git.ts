@@ -359,19 +359,47 @@ export async function syncStatus(dir: string) {
   const pausedMs = gitPausedFor();
   const paused = pausedMs > 0 ? { paused: Math.ceil(pausedMs / 1000) } : {};
   try {
-    const { st, stashed } = await gitRead(`status:${vaultDir}`, STATUS_TTL_MS, async () => {
+    const result = await gitRead(`status:${vaultDir}`, STATUS_TTL_MS, async () => {
       const g = vaultGit(vaultDir);
       const st = await g.status();
-      // Stash entries are reported because nothing in Engram creates one any more. Any that exist
-      // are vault content the old `--autostash` pull stranded — recoverable with `git stash list`
-      // / `git stash pop`, but invisible until someone is told it is there.
-      const stashed = await g
-        .stashList()
-        .then((l) => l.total)
-        .catch(() => 0);
-      return { st, stashed };
+      const stashed = await g.stashList().then((l) => l.total).catch(() => 0);
+
+      // Detect "false green" scenario: git status shows ahead=0/behind=0 when there's no upstream.
+      // This happens with empty remote repos where origin/main doesn't exist yet.
+      let noUpstream = false;
+      let remoteEmpty = false;
+      let localCommits = 0;
+
+      // Check if tracking is set (e.g., "origin/main")
+      const hasTracking = !!st.tracking;
+      if (!hasTracking && st.current && !st.detached) {
+        noUpstream = true;
+        // Check if the remote branch exists at all
+        try {
+          const refs = await g.listRemote(["--heads", "origin", st.current]);
+          remoteEmpty = refs.trim().length === 0;
+        } catch {
+          remoteEmpty = true; // Network error or remote not found
+        }
+
+        // Count local commits that haven't been pushed
+        // For untracked branches, count all commits (since there's no remote to compare)
+        try {
+          const log = await g.log({ maxCount: 100 });
+          localCommits = log.total;
+        } catch {
+          // No commits at all (truly empty local repo)
+          localCommits = 0;
+        }
+      }
+
+      return { st, stashed, noUpstream, remoteEmpty, localCommits };
     });
-    return {
+
+    const { st, stashed, noUpstream, remoteEmpty, localCommits } = result;
+
+    // Build the response with clear diagnostics for the false-green scenario
+    const base = {
       enabled: true as const,
       dirty: st.files.length,
       ahead: st.ahead,
@@ -382,6 +410,23 @@ export async function syncStatus(dir: string) {
       ...paused,
       ...(s.lastError ? { lastError: s.lastError } : {}),
     };
+
+    // Surface upstream issues that cause the "synced but never pushed" false green
+    if (noUpstream) {
+      return {
+        ...base,
+        noUpstream: true,
+        ...(remoteEmpty ? { remoteEmpty: true } : {}),
+        ...(localCommits > 0 ? { localCommits, unpushed: true } : {}),
+        // Override ahead to show local commits when there's no upstream to compare against
+        ahead: localCommits,
+        warning: remoteEmpty
+          ? `Remote branch origin/${st.current} does not exist (empty repo). ${localCommits} local commit(s) have never been pushed. Trigger a sync to push.`
+          : `Branch has no upstream tracking. ${localCommits} local commit(s) may not be pushed.`,
+      };
+    }
+
+    return base;
   } catch {
     return { enabled: true as const, error: true, ...paused };
   }

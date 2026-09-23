@@ -45,6 +45,25 @@ describe("workspace tools surface", () => {
     const schema = tool!.inputSchema as { required?: string[] };
     expect(schema.required).toContain("id");
   });
+
+  test("brain_sync_status is read-only", () => {
+    const tool = WORKSPACE_TOOL_MAP.get("brain_sync_status");
+    expect(tool).toBeDefined();
+    expect(tool!.write).toBeFalsy();
+  });
+
+  test("brain_sync is marked as write (modifies git state)", () => {
+    const tool = WORKSPACE_TOOL_MAP.get("brain_sync");
+    expect(tool).toBeDefined();
+    expect(tool!.write).toBe(true);
+  });
+
+  test("all expected workspace tools are present", () => {
+    const expectedTools = ["brain_workspaces", "brain_use_workspace", "brain_sync_status", "brain_sync"];
+    for (const name of expectedTools) {
+      expect(WORKSPACE_TOOL_MAP.has(name)).toBe(true);
+    }
+  });
 });
 
 describe("workspace session management", () => {
