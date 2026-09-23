@@ -129,6 +129,69 @@ export function renameRepo(id: string, name: string): Repo | null {
   return strip(rec);
 }
 
+/**
+ * SAFE token refresh: update the git credentials for an existing workspace WITHOUT deleting
+ * the clone. Use this to fix 403/auth errors without losing local notes.
+ *
+ * NEVER use delete+add to "reconnect" a workspace — that wipes the clone and loses any
+ * unpushed notes. This function preserves everything and just updates the credentials.
+ *
+ * Updates:
+ * 1. tokenEnc in repos.json (encrypted)
+ * 2. The git remote origin URL (with new token embedded for HTTPS auth)
+ */
+export async function updateRepoToken(
+  id: string,
+  newToken: string,
+): Promise<{ ok: true; repo: Repo } | { ok: false; error: string }> {
+  const all = load();
+  const rec = all.find((r) => r.id === id);
+  if (!rec) {
+    return { ok: false, error: `workspace not found: ${id}` };
+  }
+
+  const dir = vaultDirFor(id);
+  if (!fs.existsSync(path.join(dir, ".git"))) {
+    return { ok: false, error: `workspace clone is missing: ${rec.name}. Cannot update token without a clone.` };
+  }
+
+  try {
+    // Update the git remote URL with the new token
+    const newUrl = authedUrl(rec.url, newToken);
+    await runGit(async () => {
+      const g = simpleGit(dir);
+      await g.remote(["set-url", "origin", newUrl]);
+    });
+
+    // Update the stored token
+    rec.tokenEnc = encryptSecret(newToken);
+    save(all);
+
+    console.log(`[repos] token updated for workspace ${rec.name} (${id})`);
+    return { ok: true, repo: strip(rec) };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`[repos] token update failed for ${rec.name}:`, e);
+    return { ok: false, error: `failed to update token: ${msg}` };
+  }
+}
+
+/**
+ * Check if a workspace has a token configured.
+ */
+export function repoHasToken(id: string): boolean {
+  const r = load().find((x) => x.id === id);
+  return !!r?.tokenEnc;
+}
+
+/**
+ * DANGER: removeRepo deletes the entire vault clone including any unpushed notes!
+ * 
+ * If you need to fix auth/credentials, use updateRepoToken() instead — it preserves
+ * the clone and just updates the token.
+ * 
+ * Only use removeRepo when you truly want to disconnect and DELETE the workspace.
+ */
 export function removeRepo(id: string): void {
   save(load().filter((r) => r.id !== id));
   try {

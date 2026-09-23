@@ -322,12 +322,19 @@ or push content to the GitHub repo and wait for the next sync (or trigger one vi
 
 **Notes show in the UI but GitHub stays empty / sync errors**
 If notes appear in the Engram dashboard but the GitHub repo has no commits:
-1. Check `brain_workspaces` — look for `syncError` on the workspace
-2. Common causes: token lacks push access, repo was deleted, branch protection rules
+1. Check `brain_workspaces` — look for `syncError` on the workspace, or call `brain_sync_status`
+2. Common causes: token lacks **write** access (403), repo was deleted, branch protection rules
 3. Engram now handles first-push to empty repos automatically (with `-u` to set tracking)
-4. **Operator recovery**: SSH into the Railway container, `cd /data/vaults/<workspace-id>`, and
-   `git push -u origin main --force` to push local notes to GitHub. Then reconnect the workspace
-   in the UI if needed.
+4. **Fix 403 errors**: Update the token via `PUT /api/repos/<id>` with `{"token": "ghp_..."}` — this
+   preserves the clone and just updates credentials
+5. **Trigger sync**: Call `brain_sync` via MCP, or `POST /api/sync?push=true` via the dashboard
+
+**⚠️ NEVER delete+add a workspace to "fix" auth errors**
+`removeRepo` deletes the entire vault clone including unpushed notes! If you have notes in the UI
+that haven't been pushed to GitHub, deleting the workspace loses them forever. Instead:
+1. **Update the token**: `PUT /api/repos/<workspace-id>` with a new token that has write access
+2. **Trigger sync**: `POST /api/sync?push=true` to push the notes
+3. **Verify**: `GET /api/sync` should show `pushed: true` or check GitHub
 
 ## Contributing
 
