@@ -1,7 +1,7 @@
 # Treg API Gateway
 
-Engram can proxy [Treg's](https://treg.ai) external API catalog, letting clients that only connect
-to Engram discover and call 2,600+ external APIs without a separate Treg MCP connector.
+Engram can proxy [Treg's](https://treg.to) external API catalog, letting clients that only connect
+to Engram discover and call 3,600+ external APIs without a separate Treg MCP connector.
 
 ## Setup
 
@@ -10,7 +10,8 @@ Set these environment variables on Railway (or your host):
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `TREG_TOKEN` | Yes | — | Your Treg API token |
-| `TREG_BASE_URL` | No | `https://api.treg.ai` | Treg API base URL |
+| `TREG_BASE_URL` | No | `https://treg.to` | Treg API base URL |
+| `TREG_ORG_ID` | For balance | — | Treg org ID (per-org tokens bake this in) |
 | `TREG_MAX_USD_PER_CALL` | No | `0.01` | Maximum cost per `tool_call` |
 
 When `TREG_TOKEN` is unset, the Treg tools are hidden from the MCP surface entirely — matching
