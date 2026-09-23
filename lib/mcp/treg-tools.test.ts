@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { TREG_TOOLS, TREG_TOOL_MAP } from "./treg-tools";
+import { isNumericOrgId, stringifyErrorField, clearOrgIdCache } from "@/lib/treg";
 
 /**
  * Treg tool tests:
@@ -170,5 +171,61 @@ describe("integration with visibleTools", () => {
     const writeTreg = TREG_TOOLS.filter((t) => t.write);
     expect(writeTreg.every((t) => t.write)).toBe(true);
     expect(writeTreg.map((t) => t.name)).toEqual(TREG_WRITE_TOOLS);
+  });
+});
+
+describe("Treg org ID helpers", () => {
+  test("isNumericOrgId returns true for all-digit strings", () => {
+    expect(isNumericOrgId("123")).toBe(true);
+    expect(isNumericOrgId("0")).toBe(true);
+    expect(isNumericOrgId("999999")).toBe(true);
+  });
+
+  test("isNumericOrgId returns false for slugs and mixed strings", () => {
+    expect(isNumericOrgId("harold-builds")).toBe(false);
+    expect(isNumericOrgId("team-123")).toBe(false);
+    expect(isNumericOrgId("123abc")).toBe(false);
+    expect(isNumericOrgId("")).toBe(false);
+    expect(isNumericOrgId(" 123")).toBe(false);
+    expect(isNumericOrgId("123 ")).toBe(false);
+  });
+
+  test("clearOrgIdCache is callable", () => {
+    expect(() => clearOrgIdCache()).not.toThrow();
+  });
+});
+
+describe("Treg error stringification", () => {
+  test("stringifyErrorField handles string values", () => {
+    expect(stringifyErrorField("simple error")).toBe("simple error");
+    expect(stringifyErrorField("")).toBe("");
+  });
+
+  test("stringifyErrorField handles null and undefined", () => {
+    expect(stringifyErrorField(null)).toBe("");
+    expect(stringifyErrorField(undefined)).toBe("");
+  });
+
+  test("stringifyErrorField JSON-stringifies objects", () => {
+    expect(stringifyErrorField({ msg: "error" })).toBe('{"msg":"error"}');
+    expect(stringifyErrorField({ code: 400, reason: "bad request" })).toBe(
+      '{"code":400,"reason":"bad request"}',
+    );
+  });
+
+  test("stringifyErrorField JSON-stringifies arrays (FastAPI detail format)", () => {
+    const fastApiDetail = [
+      { loc: ["body", "org_id"], msg: "value is not a valid integer", type: "type_error.integer" },
+    ];
+    const result = stringifyErrorField(fastApiDetail);
+    expect(result).toContain("value is not a valid integer");
+    expect(result).toContain("type_error.integer");
+  });
+
+  test("stringifyErrorField prevents [object Object] output", () => {
+    const obj = { nested: { deep: true } };
+    const result = stringifyErrorField(obj);
+    expect(result).not.toContain("[object Object]");
+    expect(result).toBe('{"nested":{"deep":true}}');
   });
 });
