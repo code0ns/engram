@@ -4,7 +4,7 @@ import { hasAnyToken, resolveToken, type TokenScope } from "@/lib/tokens";
 import { oauthEnabled, verifyAccessToken, wwwAuthenticate } from "@/lib/oauth";
 import { withActor } from "@/lib/actor";
 import { VERSION } from "@/lib/version";
-import { TOOL_MAP, visibleTools } from "@/lib/mcp/tools";
+import { getTool, visibleTools } from "@/lib/mcp/tools";
 import { callTool } from "@/lib/mcp/call";
 import { resolveTokenWorkspace, type TokenCaller } from "@/lib/workspace-resolve";
 
@@ -53,7 +53,7 @@ async function handleMessage(msg: Json, caller: Caller, dir: string): Promise<Js
       });
     }
     case "tools/call": {
-      const tool = TOOL_MAP.get(params?.name);
+      const tool = getTool(params?.name);
       if (!tool) return rpc(id, undefined, { code: -32602, message: `unknown tool: ${params?.name}` });
       if (tool.write && caller.scope !== "write") {
         return rpc(id, undefined, {
