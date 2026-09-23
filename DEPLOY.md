@@ -85,6 +85,37 @@ itself (Dynamic Client Registration) and sends you through **your Google login +
 allowlist**; approve and you're connected — no open endpoint, no shared secret. Requires a paid
 Claude plan (and, on Team/Enterprise, an admin to enable custom connectors).
 
+## 6. (Optional) Treg API Gateway — external APIs through Engram
+Expose [Treg's](https://treg.ai) catalog of 2,600+ external API endpoints through Engram's MCP.
+Clients that only connect to Engram can search, inspect, and call cheap external APIs without a
+separate Treg connector.
+
+**Railway → Variables:**
+| Variable | Value |
+|---|---|
+| `TREG_TOKEN` | Your Treg API token (required to enable) |
+| `TREG_BASE_URL` | API base URL (default: `https://api.treg.ai`) |
+| `TREG_MAX_USD_PER_CALL` | Max cost per call (default: `0.01`) — calls above this are refused |
+
+When `TREG_TOKEN` is set, four new MCP tools appear:
+- **`tool_search`** (read) — search the catalog by task description
+- **`tool_get`** (read) — get full endpoint details + exact price
+- **`tool_call`** (write) — call an endpoint (costs money)
+- **`tool_balance`** (write) — check Treg account balance
+
+**Scope rules match Engram's patterns:** read-scoped tokens see `tool_search` and `tool_get` only
+(discovery, no cost). Write-scoped tokens also see `tool_call` and `tool_balance` (spend money or
+reveal balance).
+
+**Example agent flow:**
+```
+1. tool_search("reverse geocode coordinates") → returns endpoints with prices
+2. tool_get("geocoding-reverse-v1")           → full params + exact price $0.0005
+3. tool_call("geocoding-reverse-v1", {lat: 40.7, lon: -74}, 0.0005) → result
+```
+
+Without `TREG_TOKEN`, the tools are hidden entirely (not erroring) — same pattern as `brain_capture`.
+
 ## Notes
 - **No auth locally:** leave `AUTH_SECRET` empty (or `AUTH_DISABLED=true`) and the dashboard is open; the MCP is open until a token exists.
 - Git tokens are stored **encrypted** at rest (keyed off `AUTH_SECRET`); token hashes and vault clones live under `ENGRAM_DATA_DIR`, never in a vault repo.

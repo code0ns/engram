@@ -23,6 +23,8 @@ import {
   writeNoteRaw,
 } from "@/lib/vault/write";
 import { hasRead, recordRead } from "./session";
+import { TREG_TOOLS, TREG_TOOL_MAP } from "./treg-tools";
+import { tregEnabled } from "@/lib/treg";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Args = Record<string, any>;
@@ -365,7 +367,16 @@ export const TOOLS: Tool[] = [
   },
 ];
 
+/** All brain_* tools (the core vault surface). */
 export const TOOL_MAP = new Map(TOOLS.map((t) => [t.name, t]));
+
+/** All tools including Treg — used by callTool. */
+const ALL_TOOL_MAP = new Map([...TOOL_MAP, ...TREG_TOOL_MAP]);
+
+/** Lookup a tool by name (includes Treg tools). */
+export function getTool(name: string): Tool | undefined {
+  return ALL_TOOL_MAP.get(name);
+}
 
 /**
  * The tools a caller may see, given its scope.
@@ -376,11 +387,20 @@ export const TOOL_MAP = new Map(TOOLS.map((t) => [t.name, t]));
  * tests can pin, rather than as a filter expression inline in a request handler.
  *
  * The auto-filing harness stays hidden unless it's turned on — agents file notes themselves.
+ * Treg tools are hidden when TREG_TOKEN is not configured — matching how brain_capture is hidden.
  */
 export function visibleTools(canWrite: boolean, harnessOn: boolean): Tool[] {
-  return TOOLS.filter((t) => {
+  const tregOn = tregEnabled();
+  const brainTools = TOOLS.filter((t) => {
     if (t.name === "brain_capture" && !harnessOn) return false;
     if (t.write && !canWrite) return false;
     return true;
   });
+  if (!tregOn) return brainTools;
+
+  const tregTools = TREG_TOOLS.filter((t) => {
+    if (t.write && !canWrite) return false;
+    return true;
+  });
+  return [...brainTools, ...tregTools];
 }

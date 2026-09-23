@@ -1,9 +1,27 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useState, useEffect, createContext, useContext, useMemo, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import useSWR, { useSWRConfig } from "swr";
-import { Check, ChevronRight, FileText, Palette, Pencil, Pipette, Trash2, X } from "lucide-react";
+import { Check, ChevronRight, FileText, Palette, Pencil, Pipette, Trash2, X, GripVertical } from "lucide-react";
+import {
+  DndContext,
+  DragOverlay,
+  useSensor,
+  useSensors,
+  PointerSensor,
+  closestCenter,
+  type DragStartEvent,
+  type DragEndEvent,
+  type DragOverEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+  arrayMove,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { fetcher, folderColor, type TreeNode } from "@/lib/client";
 import { cn } from "@/lib/utils";
 import {
@@ -23,6 +41,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import type { FolderOrder } from "@/lib/vault/folder-order";
 
 /** Parent directory of a vault-relative path ("" for something at the vault root). */
 export function dirOf(p: string): string {
@@ -40,6 +59,7 @@ export function useVaultMutations() {
     mutate("/api/tree");
     mutate("/api/notes");
     mutate("/api/graph");
+    mutate("/api/folder-order");
   };
 }
 
@@ -138,8 +158,6 @@ function hsvToRgb(h: number, s: number, v: number): { r: number; g: number; b: n
   return { r: (rgb[0] + m) * 255, g: (rgb[1] + m) * 255, b: (rgb[2] + m) * 255 };
 }
 
-/** Saturation/value field: drag to set both at once. Pointer capture on the element itself
- *  means move/up keep firing on it even once the cursor leaves its bounds mid-drag. */
 function SvField({
   hue,
   s,
@@ -181,7 +199,6 @@ function SvField({
   );
 }
 
-/** Single hue slider — the "color slider" itself, as opposed to three separate R/G/B ones. */
 function HueSlider({ hue, onChange }: { hue: number; onChange: (h: number) => void }) {
   function update(el: HTMLElement, clientX: number) {
     const rect = el.getBoundingClientRect();
@@ -209,10 +226,6 @@ function HueSlider({ hue, onChange }: { hue: number; onChange: (h: number) => vo
   );
 }
 
-/** In-app color picker — deliberately not `<input type="color">`, which opens an unstyleable
- *  OS-native dialog that clashes with everything else in the app (square corners, wrong font,
- *  no explicit save/cancel). Positioned relative to its parent `<li>` (needs `position: relative`
- *  there); matches ContextMenuContent/DialogContent styling so it looks like part of the app. */
 export function ColorPicker({
   initial,
   onSave,
@@ -255,7 +268,6 @@ export function ColorPicker({
 
   async function pickWithEyedropper() {
     try {
-      // EyeDropper isn't in the TS DOM lib yet.
       const ed = new (window as unknown as { EyeDropper: new () => { open: () => Promise<{ sRGBHex: string }> } }).EyeDropper();
       const result = await ed.open();
       const rgb = hexToRgb(result.sRGBHex);
@@ -380,16 +392,83 @@ export function ColorPicker({
   );
 }
 
-function Dir({ node, activePath, depth }: { node: TreeNode; activePath?: string; depth: number }) {
-  const [open, setOpen] = useState(depth === 0);
+interface DragItem {
+  id: string;
+  type: "dir" | "file";
+  path: string;
+  name: string;
+  parentPath: string;
+}
+
+interface TreeContextValue {
+  activePath?: string;
+  draggedItem: DragItem | null;
+  dropTarget: string | null;
+  isValidDropTarget: (targetPath: string) => boolean;
+  colorData?: { colors: Record<string, string> };
+  orderData?: { order: FolderOrder };
+  expandedFolders: Set<string>;
+  toggleFolder: (path: string) => void;
+}
+
+const TreeContext = createContext<TreeContextValue>({
+  draggedItem: null,
+  dropTarget: null,
+  isValidDropTarget: () => false,
+  expandedFolders: new Set(),
+  toggleFolder: () => {},
+});
+
+const EXPANDED_FOLDERS_KEY = "engram-expanded-folders";
+
+function isDescendantOf(childPath: string, parentPath: string): boolean {
+  if (!parentPath) return false;
+  return childPath === parentPath || childPath.startsWith(`${parentPath}/`);
+}
+
+function SortableDir({ 
+  node, 
+  depth,
+}: { 
+  node: TreeNode; 
+  depth: number;
+}) {
+  const { activePath, dropTarget, isValidDropTarget, colorData, orderData, expandedFolders, toggleFolder } = useContext(TreeContext);
+  const open = expandedFolders.has(node.path);
   const [renaming, setRenaming] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [pickingColor, setPickingColor] = useState(false);
   const router = useRouter();
   const refresh = useVaultMutations();
   const { mutate } = useSWRConfig();
-  const { data: colorData } = useSWR<{ colors: Record<string, string> }>("/api/folder-colors", fetcher);
   const color = folderColor(node.name, colorData?.colors);
+
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({
+    id: `dir:${node.path}`,
+    data: {
+      id: `dir:${node.path}`,
+      type: "dir",
+      path: node.path,
+      name: node.name,
+      parentPath: dirOf(node.path),
+    } satisfies DragItem,
+  });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  };
+
+  const isDropTarget = dropTarget === node.path && isValidDropTarget(node.path);
+  const isInvalidDropTarget = dropTarget === node.path && !isValidDropTarget(node.path);
 
   async function rename(newName: string) {
     setRenaming(false);
@@ -424,8 +503,37 @@ function Dir({ node, activePath, depth }: { node: TreeNode; activePath?: string;
     if (res.ok) mutate("/api/folder-colors");
   }
 
+  const sortedChildren = useMemo(() => {
+    if (!node.children) return [];
+    const dirs = node.children.filter((c) => c.type === "dir");
+    const files = node.children.filter((c) => c.type === "file");
+    
+    const childOrder = orderData?.order?.[node.path];
+    let sortedDirs: TreeNode[];
+    
+    if (childOrder && childOrder.length > 0) {
+      const orderMap = new Map(childOrder.map((name, idx) => [name, idx]));
+      sortedDirs = [...dirs].sort((a, b) => {
+        const aIdx = orderMap.get(a.name);
+        const bIdx = orderMap.get(b.name);
+        if (aIdx !== undefined && bIdx !== undefined) return aIdx - bIdx;
+        if (aIdx !== undefined) return -1;
+        if (bIdx !== undefined) return 1;
+        return a.name.localeCompare(b.name);
+      });
+    } else {
+      sortedDirs = [...dirs].sort((a, b) => a.name.localeCompare(b.name));
+    }
+    
+    const sortedFiles = [...files].sort((a, b) => a.name.localeCompare(b.name));
+    return [...sortedDirs, ...sortedFiles];
+  }, [node.children, node.path, orderData?.order]);
+
+  const childDirs = sortedChildren.filter((c) => c.type === "dir");
+  const childDirIds = childDirs.map((d) => `dir:${d.path}`);
+
   return (
-    <li className="relative">
+    <li ref={setNodeRef} style={style} className="relative">
       <ContextMenu>
         <ContextMenuTrigger asChild>
           <div
@@ -435,14 +543,28 @@ function Dir({ node, activePath, depth }: { node: TreeNode; activePath?: string;
             onKeyDown={(e) => {
               if (e.key === "Enter") router.push(`/f/${node.path}`);
             }}
-            className="flex w-full cursor-pointer items-center gap-1 rounded-md py-1 pr-2 text-left text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            className={cn(
+              "group flex w-full cursor-pointer items-center gap-1 rounded-md py-1 pr-2 text-left text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
+              isDropTarget && "bg-primary/20 ring-2 ring-primary ring-inset",
+              isInvalidDropTarget && "bg-destructive/10 ring-2 ring-destructive/50 ring-inset",
+            )}
             style={{ paddingLeft: depth * 12 + 8 }}
           >
             <button
               type="button"
+              {...attributes}
+              {...listeners}
+              onClick={(e) => e.stopPropagation()}
+              className="shrink-0 cursor-grab touch-none opacity-0 group-hover:opacity-100 hover:text-foreground"
+              aria-label="Drag to reorder"
+            >
+              <GripVertical size={12} />
+            </button>
+            <button
+              type="button"
               onClick={(e) => {
                 e.stopPropagation();
-                setOpen((o) => !o);
+                toggleFolder(node.path);
               }}
               className="shrink-0"
               aria-label={open ? "Collapse folder" : "Expand folder"}
@@ -489,27 +611,54 @@ function Dir({ node, activePath, depth }: { node: TreeNode; activePath?: string;
       </AlertDialog>
 
       {open && (
-        <ul>
-          {node.children?.map((c) =>
-            c.type === "dir" ? (
-              <Dir key={c.path} node={c} activePath={activePath} depth={depth + 1} />
-            ) : (
-              <File key={c.path} node={c} activePath={activePath} depth={depth + 1} />
-            ),
-          )}
-        </ul>
+        <SortableContext items={childDirIds} strategy={verticalListSortingStrategy}>
+          <ul>
+            {sortedChildren.map((c) =>
+              c.type === "dir" ? (
+                <SortableDir key={c.path} node={c} depth={depth + 1} />
+              ) : (
+                <DraggableFile key={c.path} node={c} depth={depth + 1} />
+              ),
+            )}
+          </ul>
+        </SortableContext>
       )}
     </li>
   );
 }
 
-function File({ node, activePath, depth }: { node: TreeNode; activePath?: string; depth: number }) {
+function DraggableFile({ node, depth }: { node: TreeNode; depth: number }) {
+  const { activePath } = useContext(TreeContext);
   const router = useRouter();
   const active = node.path === activePath;
   const [renaming, setRenaming] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const refresh = useVaultMutations();
   const baseName = node.name.replace(/\.md$/i, "");
+
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({
+    id: `file:${node.path}`,
+    data: {
+      id: `file:${node.path}`,
+      type: "file",
+      path: node.path,
+      name: node.name,
+      parentPath: dirOf(node.path),
+    } satisfies DragItem,
+  });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  };
 
   async function rename(newName: string) {
     setRenaming(false);
@@ -536,17 +685,27 @@ function File({ node, activePath, depth }: { node: TreeNode; activePath?: string
   }
 
   return (
-    <li>
+    <li ref={setNodeRef} style={style}>
       <ContextMenu>
         <ContextMenuTrigger asChild>
           <button
             onClick={() => !renaming && router.push(`/n/${node.path}`)}
             className={cn(
-              "flex w-full items-center gap-1.5 truncate rounded-md py-1 pr-2 text-left transition-colors",
+              "group flex w-full items-center gap-1.5 truncate rounded-md py-1 pr-2 text-left transition-colors",
               active ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
             )}
             style={{ paddingLeft: depth * 12 + 8 }}
           >
+            <button
+              type="button"
+              {...attributes}
+              {...listeners}
+              onClick={(e) => e.stopPropagation()}
+              className="shrink-0 cursor-grab touch-none opacity-0 group-hover:opacity-100 hover:text-foreground"
+              aria-label="Drag to move"
+            >
+              <GripVertical size={12} />
+            </button>
             <FileText size={13} className="shrink-0 opacity-50" />
             {renaming ? (
               <RenameInput initial={baseName} onSubmit={rename} onCancel={() => setRenaming(false)} />
@@ -582,16 +741,272 @@ function File({ node, activePath, depth }: { node: TreeNode; activePath?: string
   );
 }
 
-export function Tree({ tree, activePath }: { tree: TreeNode; activePath?: string }) {
+function DragOverlayContent({ item }: { item: DragItem }) {
+  const { colorData } = useContext(TreeContext);
+  
+  if (item.type === "dir") {
+    const color = folderColor(item.name, colorData?.colors);
+    return (
+      <div className="flex items-center gap-1.5 rounded-md bg-popover px-2 py-1 text-sm shadow-lg ring-1 ring-border">
+        <span className="size-1.5 rounded-full" style={{ background: color }} />
+        <span>{item.name}</span>
+      </div>
+    );
+  }
+  
   return (
-    <ul className="pb-4">
-      {tree.children?.map((c) =>
-        c.type === "dir" ? (
-          <Dir key={c.path} node={c} activePath={activePath} depth={0} />
-        ) : (
-          <File key={c.path} node={c} activePath={activePath} depth={0} />
-        ),
-      )}
-    </ul>
+    <div className="flex items-center gap-1.5 rounded-md bg-popover px-2 py-1 text-sm shadow-lg ring-1 ring-border">
+      <FileText size={13} className="opacity-50" />
+      <span>{item.name.replace(/\.md$/i, "")}</span>
+    </div>
+  );
+}
+
+export function Tree({ tree, activePath }: { tree: TreeNode; activePath?: string }) {
+  const { data: colorData } = useSWR<{ colors: Record<string, string> }>("/api/folder-colors", fetcher);
+  const { data: orderData, mutate: mutateOrder } = useSWR<{ order: FolderOrder }>("/api/folder-order", fetcher);
+  const refresh = useVaultMutations();
+  
+  const [draggedItem, setDraggedItem] = useState<DragItem | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
+
+  // Persist folder expansion state in localStorage
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(() => {
+    if (typeof window === "undefined") return new Set<string>();
+    try {
+      const stored = localStorage.getItem(EXPANDED_FOLDERS_KEY);
+      return stored ? new Set(JSON.parse(stored)) : new Set<string>();
+    } catch {
+      return new Set<string>();
+    }
+  });
+
+  const toggleFolder = useCallback((path: string) => {
+    setExpandedFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      try {
+        localStorage.setItem(EXPANDED_FOLDERS_KEY, JSON.stringify([...next]));
+      } catch {
+        // localStorage not available
+      }
+      return next;
+    });
+  }, []);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: 8,
+      },
+    }),
+  );
+
+  const isValidDropTarget = useCallback((targetPath: string) => {
+    if (!draggedItem) return false;
+    if (draggedItem.path === targetPath) return false;
+    if (draggedItem.parentPath === targetPath) return false;
+    if (draggedItem.type === "dir" && isDescendantOf(targetPath, draggedItem.path)) return false;
+    return true;
+  }, [draggedItem]);
+
+  const handleDragStart = useCallback((event: DragStartEvent) => {
+    const data = event.active.data.current as DragItem;
+    setDraggedItem(data);
+  }, []);
+
+  const handleDragOver = useCallback((event: DragOverEvent) => {
+    const over = event.over;
+    if (!over) {
+      setDropTarget(null);
+      return;
+    }
+
+    const overId = over.id.toString();
+    if (overId.startsWith("dir:")) {
+      setDropTarget(overId.slice(4));
+    } else {
+      setDropTarget(null);
+    }
+  }, []);
+
+  const handleDragEnd = useCallback(async (event: DragEndEvent) => {
+    const { active, over } = event;
+    setDraggedItem(null);
+    setDropTarget(null);
+
+    if (!over) return;
+
+    const activeData = active.data.current as DragItem;
+    const overId = over.id.toString();
+    const activeId = active.id.toString();
+
+    if (activeId.startsWith("dir:") && overId.startsWith("dir:")) {
+      const activePath = activeId.slice(4);
+      const overPath = overId.slice(4);
+      const activeParent = dirOf(activePath);
+      const overParent = dirOf(overPath);
+
+      if (activeParent === overParent && activePath !== overPath) {
+        const parentPath = activeParent;
+        const currentOrder = orderData?.order?.[parentPath] ?? [];
+        
+        const dirs = tree.children?.filter((c) => c.type === "dir" && dirOf(c.path) === parentPath) ?? [];
+        const siblingDirs = parentPath === "" 
+          ? dirs 
+          : (function findSiblings(node: TreeNode, targetParent: string): TreeNode[] {
+              if (node.path === targetParent) {
+                return node.children?.filter((c) => c.type === "dir") ?? [];
+              }
+              for (const child of node.children ?? []) {
+                if (child.type === "dir") {
+                  const found = findSiblings(child, targetParent);
+                  if (found.length > 0) return found;
+                }
+              }
+              return [];
+            })(tree, parentPath);
+
+        const folderNames = siblingDirs.map((d) => d.name);
+        if (currentOrder.length > 0) {
+          const orderMap = new Map(currentOrder.map((name, idx) => [name, idx]));
+          folderNames.sort((a, b) => {
+            const aIdx = orderMap.get(a);
+            const bIdx = orderMap.get(b);
+            if (aIdx !== undefined && bIdx !== undefined) return aIdx - bIdx;
+            if (aIdx !== undefined) return -1;
+            if (bIdx !== undefined) return 1;
+            return a.localeCompare(b);
+          });
+        } else {
+          folderNames.sort((a, b) => a.localeCompare(b));
+        }
+
+        const activeName = activePath.split("/").pop()!;
+        const overName = overPath.split("/").pop()!;
+        const oldIndex = folderNames.indexOf(activeName);
+        const newIndex = folderNames.indexOf(overName);
+
+        if (oldIndex !== -1 && newIndex !== -1 && oldIndex !== newIndex) {
+          const newOrder = arrayMove(folderNames, oldIndex, newIndex);
+          
+          await mutateOrder({ order: { ...orderData?.order, [parentPath]: newOrder } }, false);
+          
+          const res = await fetch("/api/folder-order", {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ parentPath, folderNames: newOrder }),
+          });
+          
+          if (!res.ok) {
+            mutateOrder();
+          }
+        }
+        return;
+      }
+
+      if (activeData.type === "dir" && !isDescendantOf(overPath, activePath) && activePath !== overPath && activeParent !== overPath) {
+        const newPath = `${overPath}/${activeData.name}`;
+        const res = await fetch(`/api/folders/${activePath}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ to: newPath }),
+        });
+        if (res.ok) {
+          refresh();
+        }
+        return;
+      }
+    }
+
+    if (activeId.startsWith("file:") && overId.startsWith("dir:")) {
+      const filePath = activeId.slice(5);
+      const targetDir = overId.slice(4);
+      const fileName = filePath.split("/").pop()!;
+      const currentDir = dirOf(filePath);
+
+      if (currentDir !== targetDir && !isDescendantOf(targetDir, filePath)) {
+        const newPath = `${targetDir}/${fileName}`;
+        const res = await fetch(`/api/notes/${filePath}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ to: newPath }),
+        });
+        if (res.ok) {
+          refresh();
+        }
+      }
+    }
+  }, [orderData, tree, mutateOrder, refresh]);
+
+  const contextValue = useMemo<TreeContextValue>(() => ({
+    activePath,
+    draggedItem,
+    dropTarget,
+    isValidDropTarget,
+    colorData,
+    orderData,
+    expandedFolders,
+    toggleFolder,
+  }), [activePath, draggedItem, dropTarget, isValidDropTarget, colorData, orderData, expandedFolders, toggleFolder]);
+
+  const sortedRootChildren = useMemo(() => {
+    if (!tree.children) return [];
+    const dirs = tree.children.filter((c) => c.type === "dir");
+    const files = tree.children.filter((c) => c.type === "file");
+    
+    const rootOrder = orderData?.order?.[""];
+    let sortedDirs: TreeNode[];
+    
+    if (rootOrder && rootOrder.length > 0) {
+      const orderMap = new Map(rootOrder.map((name, idx) => [name, idx]));
+      sortedDirs = [...dirs].sort((a, b) => {
+        const aIdx = orderMap.get(a.name);
+        const bIdx = orderMap.get(b.name);
+        if (aIdx !== undefined && bIdx !== undefined) return aIdx - bIdx;
+        if (aIdx !== undefined) return -1;
+        if (bIdx !== undefined) return 1;
+        return a.name.localeCompare(b.name);
+      });
+    } else {
+      sortedDirs = [...dirs].sort((a, b) => a.name.localeCompare(b.name));
+    }
+    
+    const sortedFiles = [...files].sort((a, b) => a.name.localeCompare(b.name));
+    return [...sortedDirs, ...sortedFiles];
+  }, [tree.children, orderData?.order]);
+
+  const rootDirs = sortedRootChildren.filter((c) => c.type === "dir");
+  const rootDirIds = rootDirs.map((d) => `dir:${d.path}`);
+
+  return (
+    <TreeContext.Provider value={contextValue}>
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        onDragStart={handleDragStart}
+        onDragOver={handleDragOver}
+        onDragEnd={handleDragEnd}
+      >
+        <SortableContext items={rootDirIds} strategy={verticalListSortingStrategy}>
+          <ul className="pb-4">
+            {sortedRootChildren.map((c) =>
+              c.type === "dir" ? (
+                <SortableDir key={c.path} node={c} depth={0} />
+              ) : (
+                <DraggableFile key={c.path} node={c} depth={0} />
+              ),
+            )}
+          </ul>
+        </SortableContext>
+        <DragOverlay>
+          {draggedItem ? <DragOverlayContent item={draggedItem} /> : null}
+        </DragOverlay>
+      </DndContext>
+    </TreeContext.Provider>
   );
 }

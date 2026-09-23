@@ -77,18 +77,19 @@ export async function resolveDashboardWorkspace(req: Request): Promise<ResolvedW
 export type TokenCaller =
   | { kind: "local" }
   | { kind: "shared" }
-  | { kind: "named"; workspaceId?: string }
+  | { kind: "named"; workspaceIds: string[] }
   | { kind: "oauth"; email: string };
 
 /**
  * MCP/token callers. "local" (no auth configured at all), "shared" (the env MCP_TOKEN),
- * and a "named" token minted before workspace pinning existed (workspaceId undefined)
+ * and a "named" token minted before workspace pinning existed (workspaceIds empty)
  * all fall back to the legacy default workspace — these are credentials that predate or
  * were always meant as "the operator, full access."
  *
- * A "named" token WITH a workspaceId resolves only to that workspace, or null if it was
- * since deleted (never silently falls back — a deleted workspace must surface as an
- * error, not quietly hand the token a different vault).
+ * A "named" token WITH workspaceIds resolves to the first valid workspace in its list,
+ * preferring the globally active one if it's in the list. Returns null if none of the
+ * token's workspaces exist anymore (never silently falls back — a deleted workspace must
+ * surface as an error, not quietly hand the token a different vault).
  *
  * "oauth" carries a real identity (the Google-login email, via lib/oauth.ts's `sub`) that
  * went through the same ALLOWED_EMAILS gate as a dashboard login, so it gets the same
@@ -100,9 +101,13 @@ export function resolveTokenWorkspace(caller: TokenCaller): ResolvedWorkspace | 
     case "shared":
       return defaultWorkspace();
     case "named": {
-      if (!caller.workspaceId) return defaultWorkspace();
-      const repo = listRepos().find((r) => r.id === caller.workspaceId);
-      return repo ? repoToResolved(repo) : null;
+      if (!caller.workspaceIds || caller.workspaceIds.length === 0) return defaultWorkspace();
+      const repos = listRepos();
+      const allowed = repos.filter((r) => caller.workspaceIds.includes(r.id));
+      if (allowed.length === 0) return null;
+      const active = getActive();
+      const activeAllowed = active && allowed.find((r) => r.id === active.id);
+      return repoToResolved(activeAllowed || allowed[0]);
     }
     case "oauth": {
       if (!isAllowed(caller.email)) return null;
@@ -111,6 +116,23 @@ export function resolveTokenWorkspace(caller: TokenCaller): ResolvedWorkspace | 
       const active = getActive();
       const activeGranted = active && granted.find((r) => r.id === active.id);
       return repoToResolved(activeGranted || granted[0]);
+    }
+  }
+}
+
+/** Check if a token caller has access to a specific workspace. */
+export function tokenHasWorkspaceAccess(caller: TokenCaller, workspaceId: string): boolean {
+  switch (caller.kind) {
+    case "local":
+    case "shared":
+      return true; // Legacy full access
+    case "named":
+      if (!caller.workspaceIds || caller.workspaceIds.length === 0) return true; // Legacy unscoped
+      return caller.workspaceIds.includes(workspaceId);
+    case "oauth": {
+      if (!isAllowed(caller.email)) return false;
+      const granted = grantedWorkspacesFor(caller.email);
+      return granted.some((r) => r.id === workspaceId);
     }
   }
 }
