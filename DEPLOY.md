@@ -85,6 +85,21 @@ itself (Dynamic Client Registration) and sends you through **your Google login +
 allowlist**; approve and you're connected — no open endpoint, no shared secret. Requires a paid
 Claude plan (and, on Team/Enterprise, an admin to enable custom connectors).
 
+## 6. (Optional) Treg integration — external tool catalog
+[Treg](https://treg.to) gives agents access to 3,600+ external endpoints (SEO, backlinks, social,
+enrichment, ads, scraping, image/video generation) through a unified API. When configured, Engram
+exposes `tool_search`, `tool_get`, `tool_call`, and `tool_balance` MCP tools.
+
+1. Sign up at [treg.to](https://treg.to) (GitHub or email)
+2. Create or join a team, then go to Settings → API Keys
+3. Set `TREG_TOKEN` in your environment (Railway Variables or `.env.local`)
+
+Optional variables:
+- `TREG_ORG_ID` — org ID for balance queries (auto-detected from token if omitted)
+- `TREG_MAX_USD_PER_CALL` — max cost per call in USD (default: `1.0`) — prevents runaway spend
+
+See [docs/treg.md](docs/treg.md) for full documentation.
+
 ## Notes
 - **No auth locally:** leave `AUTH_SECRET` empty (or `AUTH_DISABLED=true`) and the dashboard is open; the MCP is open until a token exists.
 - Git tokens are stored **encrypted** at rest (keyed off `AUTH_SECRET`); token hashes and vault clones live under `ENGRAM_DATA_DIR`, never in a vault repo.

@@ -7,6 +7,7 @@ import { VERSION } from "@/lib/version";
 import { TOOL_MAP, visibleTools } from "@/lib/mcp/tools";
 import { callTool } from "@/lib/mcp/call";
 import { resolveTokenWorkspace, type TokenCaller } from "@/lib/workspace-resolve";
+import { TREG_TOOL_MAP, visibleTregTools } from "@/lib/mcp/treg-tools";
 
 export const dynamic = "force-dynamic";
 
@@ -47,14 +48,32 @@ async function handleMessage(msg: Json, caller: Caller, dir: string): Promise<Js
     case "ping":
       return rpc(id, {});
     case "tools/list": {
-      const tools = visibleTools(caller.scope === "write", harnessEnabled());
-      return rpc(id, {
-        tools: tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
-      });
+      const vaultTools = visibleTools(caller.scope === "write", harnessEnabled());
+      const tregTools = visibleTregTools();
+      const allTools = [
+        ...vaultTools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
+        ...tregTools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
+      ];
+      return rpc(id, { tools: allTools });
     }
     case "tools/call": {
-      const tool = TOOL_MAP.get(params?.name);
-      if (!tool) return rpc(id, undefined, { code: -32602, message: `unknown tool: ${params?.name}` });
+      const toolName = params?.name;
+
+      // Check Treg tools first
+      const tregTool = TREG_TOOL_MAP.get(toolName);
+      if (tregTool) {
+        try {
+          const out = await tregTool.handler(params?.arguments ?? {});
+          const text = typeof out === "string" ? out : JSON.stringify(out, null, 2);
+          return rpc(id, { content: [{ type: "text", text }] });
+        } catch (e) {
+          return rpc(id, { content: [{ type: "text", text: `Error: ${(e as Error)?.message ?? e}` }], isError: true });
+        }
+      }
+
+      // Fall back to vault tools
+      const tool = TOOL_MAP.get(toolName);
+      if (!tool) return rpc(id, undefined, { code: -32602, message: `unknown tool: ${toolName}` });
       if (tool.write && caller.scope !== "write") {
         return rpc(id, undefined, {
           code: -32001,
