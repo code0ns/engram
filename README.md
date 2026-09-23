@@ -332,9 +332,10 @@ If notes appear in the Engram dashboard but the GitHub repo has no commits:
 **⚠️ NEVER delete+add a workspace to "fix" auth errors**
 `removeRepo` deletes the entire vault clone including unpushed notes! If you have notes in the UI
 that haven't been pushed to GitHub, deleting the workspace loses them forever. Instead:
-1. **Update the token**: `PUT /api/repos/<workspace-id>` with a new token that has write access
-2. **Trigger sync**: `POST /api/sync?push=true` to push the notes
-3. **Verify**: `GET /api/sync` should show `pushed: true` or check GitHub
+1. **Download a backup first**: Click the download icon on the Workspaces page, or `GET /api/repos/<id>/export`
+2. **Update the token**: `PUT /api/repos/<workspace-id>` with a new token that has write access
+3. **Trigger sync**: `POST /api/sync?push=true` to push the notes
+4. **Verify**: `GET /api/sync` should show `pushed: true` or check GitHub
 
 ## Contributing
 
