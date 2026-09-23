@@ -133,6 +133,38 @@ afterAll(async () => {
   fs.rmSync(path.join(process.env.ENGRAM_DATA_DIR!, "repos.json"), { force: true });
 });
 
+/**
+ * Regression test for the clean-but-ahead bug: when the working tree is clean but there are
+ * unpushed commits (ahead > 0), syncOnce previously returned early without pushing. This test
+ * must run FIRST to validate the fix before other tests affect globalThis queue state.
+ */
+describe("clean working tree with unpushed commits still syncs", () => {
+  test("clean tree with ahead > 0 pushes without requiring a new commit", async () => {
+    const g = vaultGit();
+
+    // Create a local commit directly (bypassing the sync flow) — simulates an agent that
+    // committed but whose push was interrupted, or a workspace that restarted mid-sync.
+    fs.appendFileSync(path.join(VAULT, NOTE), "- **2026-08-07** — clean-ahead test entry.\n");
+    await g.add(["-A"]);
+    await g.commit("local commit, not yet pushed");
+
+    // Confirm the working tree is clean but we're ahead of origin
+    const statusBefore = await g.status();
+    expect(statusBefore.files.length).toBe(0); // clean
+    expect(statusBefore.ahead).toBeGreaterThan(0); // ahead
+
+    // syncNow should push even though there's nothing to commit
+    const out = await syncNow(VAULT);
+
+    expect(out?.committed).toBe(false); // no new commit needed
+    expect(out?.pushed).toBe(true); // but it DID push
+
+    // Verify we're now in sync
+    const statusAfter = await g.status();
+    expect(statusAfter.ahead).toBe(0);
+  });
+});
+
 describe("the sync queue drains", () => {
   test("a completed sync does not re-queue its reasons", async () => {
     requestSync(VAULT, "Agent Yang: append delivery.md");

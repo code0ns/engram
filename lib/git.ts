@@ -225,6 +225,9 @@ async function abortRebaseIfAny(dir: string, g: ReturnType<typeof vaultGit>): Pr
  * Handles empty remote repos (first push): when the remote branch doesn't exist yet, skip the
  * pull and push with `-u` to establish tracking. This is the common case when someone connects
  * a brand-new empty GitHub repo and starts writing notes.
+ *
+ * Also handles clean working tree with unpushed commits: when there's nothing to commit but
+ * the local branch is ahead of or behind the remote, still syncs with the remote.
  */
 async function syncOnce(dir: string, reasons: string[]): Promise<SyncOutcome> {
   const out: SyncOutcome = { committed: false, pulled: false, pushed: false };
@@ -234,9 +237,21 @@ async function syncOnce(dir: string, reasons: string[]): Promise<SyncOutcome> {
     const g = vaultGit(vaultDir);
     await g.add(["-A"]);
     const status = await g.status();
-    if (status.files.length === 0) return out;
-    await g.commit(`brain: ${reasons.length} change(s) — ${reasons.slice(0, 3).join("; ")}`);
-    out.committed = true;
+
+    const hasDirtyFiles = status.files.length > 0;
+    const needsPull = status.behind > 0;
+    const needsPush = status.ahead > 0 || !status.tracking;
+
+    // Early return only when there's truly nothing to do: clean tree with no remote sync needed.
+    if (!hasDirtyFiles && !needsPull && !needsPush) {
+      return out;
+    }
+
+    // Commit any dirty files. Skip if the tree is already clean (e.g., ahead > 0 with nothing new).
+    if (hasDirtyFiles) {
+      await g.commit(`brain: ${reasons.length} change(s) — ${reasons.slice(0, 3).join("; ")}`);
+      out.committed = true;
+    }
 
     const up = upstreamOf(status);
     if (!up) {
@@ -250,13 +265,21 @@ async function syncOnce(dir: string, reasons: string[]): Promise<SyncOutcome> {
     // directly with -u to establish tracking.
     const remoteExists = await remoteBranchExists(g, up.remote, up.branch);
 
-    if (remoteExists) {
-      // Normal case: pull --rebase to incorporate any remote changes, then push
+    // Pull --rebase when:
+    // - Remote branch exists (not a first push), AND
+    // - We just committed OR we're behind the remote (need to incorporate remote changes)
+    // Deliberately no `--autostash`: see the note on pullWorkspace. If a write landed in
+    // the gap, `git pull --rebase` refuses on a dirty tree, which loses nothing; the next
+    // tick retries.
+    if (remoteExists && (out.committed || needsPull)) {
       const before = await g.revparse(["HEAD"]).catch(() => "");
       try {
         await pullRebase(g, up);
         out.pulled = true;
         const after = await g.revparse(["HEAD"]).catch(() => "");
+        // A rebase that replayed our commit over remote work rewrote the tree; the index must
+        // follow. Previously only pullWorkspace rebuilt, so commits arriving down THIS path left
+        // search answering from pre-pull content until the watcher happened to catch up.
         if (before !== after) rebuildIndex(vaultDir);
       } catch (e) {
         const aborted = await abortRebaseIfAny(vaultDir, g);
@@ -266,7 +289,7 @@ async function syncOnce(dir: string, reasons: string[]): Promise<SyncOutcome> {
         out.conflicted = aborted;
         console.error("[git] pull failed", e);
       }
-    } else {
+    } else if (!remoteExists) {
       // Empty remote: skip pull, will push with -u below
       console.log(`[git] remote branch ${up.remote}/${up.branch} not found — first push to empty repo`);
     }
