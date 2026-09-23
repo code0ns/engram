@@ -43,15 +43,16 @@ export const TREG_TOOLS: Tool[] = [
         const result = await catalogSearch(String(query), typeof limit === "number" ? limit : undefined);
         logTregCall("search", { success: true });
         return {
-          endpoints: result.endpoints.map((e) => ({
-            endpoint_id: e.endpoint_id,
+          endpoints: result.results.map((e) => ({
+            endpoint_id: e.id,
             provider: e.provider,
             name: e.name,
-            description: e.description,
-            usd_per_call: e.usd_per_call,
-            no_key_needed: e.no_key_needed,
-            reliability: e.reliability,
+            description: e.summary,
+            usd_per_call: e.cost?.usd,
+            no_key_needed: e.platform_eligible,
+            reliability: e.observed?.ok_rate,
           })),
+          total: result.total,
           hint: "Use tool_get(endpoint_id) to see full parameters and exact price before calling.",
         };
       } catch (e) {
@@ -77,20 +78,22 @@ export const TREG_TOOLS: Tool[] = [
       try {
         const result = await catalogGet(String(endpoint_id));
         logTregCall("get", { endpointId: String(endpoint_id), success: true });
+        const usdPerCall = result.cost?.usd ?? 0;
         return {
-          endpoint_id: result.endpoint_id,
+          endpoint_id: result.id,
           provider: result.provider,
           name: result.name,
-          description: result.description,
-          usd_per_call: result.usd_per_call,
-          no_key_needed: result.no_key_needed,
-          reliability: result.reliability,
-          parameters: result.parameters,
-          response_schema: result.response_schema,
+          description: result.summary,
+          usd_per_call: usdPerCall,
+          no_key_needed: result.platform_eligible,
+          reliability: result.observed?.ok_rate,
+          parameters: result.input,
+          call_template: result.call_template,
+          siblings: result.siblings,
           hint:
-            result.usd_per_call > TREG_MAX_USD_PER_CALL
-              ? `WARNING: This endpoint costs $${result.usd_per_call.toFixed(4)}/call, which exceeds the cap of $${TREG_MAX_USD_PER_CALL.toFixed(4)}. tool_call will refuse it unless the operator raises TREG_MAX_USD_PER_CALL.`
-              : `Price $${result.usd_per_call?.toFixed(4) ?? "unknown"}/call — within the allowed cap.`,
+            usdPerCall > TREG_MAX_USD_PER_CALL
+              ? `WARNING: This endpoint costs $${usdPerCall.toFixed(4)}/call, which exceeds the cap of $${TREG_MAX_USD_PER_CALL.toFixed(4)}. tool_call will refuse it unless the operator raises TREG_MAX_USD_PER_CALL.`
+              : `Price $${usdPerCall.toFixed(4)}/call — within the allowed cap.`,
         };
       } catch (e) {
         const msg = (e as Error)?.message ?? String(e);
@@ -126,7 +129,7 @@ export const TREG_TOOLS: Tool[] = [
         return {
           data: result.data,
           call_id: result.call_id,
-          usd_charged: result.usd_charged,
+          usd_charged: result.cost_usd,
         };
       } catch (e) {
         const msg = (e as Error)?.message ?? String(e);
@@ -148,6 +151,8 @@ export const TREG_TOOLS: Tool[] = [
         logTregCall("balance", { success: true });
         return {
           balance_usd: result.balance_usd,
+          balance_micro: result.balance_micro,
+          in_flight_micro: result.in_flight_micro,
           currency: result.currency ?? "USD",
         };
       } catch (e) {

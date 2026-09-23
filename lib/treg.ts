@@ -4,17 +4,21 @@
  *
  * Config via env:
  *   TREG_TOKEN        — API token (required to enable Treg tools)
- *   TREG_BASE_URL     — API base URL (default: https://api.treg.ai)
+ *   TREG_BASE_URL     — API base URL (default: https://treg.to)
+ *   TREG_ORG_ID       — Org ID for balance endpoint (optional; per-org tokens bake this in)
  *   TREG_MAX_USD_PER_CALL — Maximum cost per tool_call (default: 0.01)
  *
  * When TREG_TOKEN is unset, Treg tools are hidden from the MCP surface entirely.
  */
 
 /** Treg API base URL. */
-export const TREG_BASE_URL = process.env.TREG_BASE_URL?.replace(/\/$/, "") || "https://api.treg.ai";
+export const TREG_BASE_URL = process.env.TREG_BASE_URL?.replace(/\/$/, "") || "https://treg.to";
 
 /** Treg API token — NOT exposed to MCP responses, only used server-side. */
 const TREG_TOKEN = process.env.TREG_TOKEN ?? "";
+
+/** Treg org ID — optional; per-org tokens bake this in, but required for balance if not. */
+const TREG_ORG_ID = process.env.TREG_ORG_ID ?? "";
 
 /** Maximum USD per call — calls above this fail with a clear error. */
 export const TREG_MAX_USD_PER_CALL = (() => {
@@ -37,63 +41,105 @@ export function getTregToken(): string {
 // ── HTTP Client ────────────────────────────────────────────────────────────────
 
 export interface TregError {
-  error: string;
+  error?: string;
+  detail?: string;
   code?: string;
   details?: unknown;
 }
 
+export interface TregCatalogEndpointCost {
+  usd?: number;
+  type?: string;
+  value?: number;
+  currency?: string;
+}
+
 export interface TregCatalogEndpoint {
-  endpoint_id: string;
+  id: string;
   provider: string;
   name: string;
-  description?: string;
-  usd_per_call?: number;
-  no_key_needed?: boolean;
-  reliability?: number;
-  tags?: string[];
+  summary?: string;
+  cost?: TregCatalogEndpointCost;
+  platform_eligible?: boolean;
+  observed?: {
+    ok_rate?: number;
+    samples?: number;
+  };
 }
 
 export interface TregCatalogSearchResult {
-  endpoints: TregCatalogEndpoint[];
-  total?: number;
+  query: string;
+  count: number;
+  total: number;
+  results: TregCatalogEndpoint[];
+  hints?: string[];
 }
 
 export interface TregCatalogGetResult {
-  endpoint_id: string;
+  id: string;
   provider: string;
   name: string;
-  description?: string;
-  usd_per_call: number;
-  no_key_needed?: boolean;
-  reliability?: number;
-  parameters?: Record<string, unknown>;
-  response_schema?: Record<string, unknown>;
-  tags?: string[];
+  summary?: string;
+  cost?: TregCatalogEndpointCost;
+  platform_eligible?: boolean;
+  input?: Record<string, unknown>;
+  output?: Record<string, unknown>;
+  call_template?: string;
+  siblings?: Array<{
+    id: string;
+    provider: string;
+    cost?: TregCatalogEndpointCost;
+  }>;
+  observed?: {
+    ok_rate?: number;
+    samples?: number;
+    p50_ms?: number;
+  };
 }
 
 export interface TregCallResult {
   data?: unknown;
   call_id?: string;
-  usd_charged?: number;
+  cost_micro?: number;
+  cost_usd?: number;
   error?: string;
 }
 
 export interface TregBalanceResult {
+  balance_micro: number;
   balance_usd: number;
+  in_flight_micro?: number;
   currency?: string;
 }
 
-async function tregFetch<T>(endpoint: string, body?: Record<string, unknown>): Promise<T> {
+interface TregFetchOptions {
+  method?: "GET" | "POST";
+  body?: Record<string, unknown>;
+  query?: Record<string, string | number | undefined>;
+}
+
+async function tregFetch<T>(endpoint: string, options: TregFetchOptions = {}): Promise<T> {
   if (!tregEnabled()) {
     throw new Error("Treg is not configured — set TREG_TOKEN to enable.");
   }
 
-  const url = `${TREG_BASE_URL}${endpoint}`;
+  const { method = "GET", body, query } = options;
+
+  let url = `${TREG_BASE_URL}${endpoint}`;
+  if (query) {
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(query)) {
+      if (v !== undefined) params.set(k, String(v));
+    }
+    const qs = params.toString();
+    if (qs) url += `?${qs}`;
+  }
+
   const res = await fetch(url, {
-    method: body ? "POST" : "GET",
+    method,
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${TREG_TOKEN}`,
+      "X-Treg-Token": TREG_TOKEN,
     },
     body: body ? JSON.stringify(body) : undefined,
   });
@@ -103,6 +149,7 @@ async function tregFetch<T>(endpoint: string, body?: Record<string, unknown>): P
     try {
       const err = (await res.json()) as TregError;
       if (err.error) msg = `Treg API: ${err.error}`;
+      else if (err.detail) msg = `Treg API: ${err.detail}`;
     } catch {
       // ignore parse errors
     }
@@ -117,9 +164,8 @@ async function tregFetch<T>(endpoint: string, body?: Record<string, unknown>): P
  * Safe for read-scope tokens — no cost, no side effects.
  */
 export async function catalogSearch(query: string, limit?: number): Promise<TregCatalogSearchResult> {
-  return tregFetch<TregCatalogSearchResult>("/v1/catalog/search", {
-    query,
-    limit: limit ?? 10,
+  return tregFetch<TregCatalogSearchResult>("/catalog/search", {
+    query: { q: query, limit: limit ?? 10 },
   });
 }
 
@@ -128,9 +174,7 @@ export async function catalogSearch(query: string, limit?: number): Promise<Treg
  * Safe for read-scope tokens — no cost, no side effects.
  */
 export async function catalogGet(endpointId: string): Promise<TregCatalogGetResult> {
-  return tregFetch<TregCatalogGetResult>("/v1/catalog/get", {
-    endpoint_id: endpointId,
-  });
+  return tregFetch<TregCatalogGetResult>(`/catalog/endpoints/${encodeURIComponent(endpointId)}`);
 }
 
 /**
@@ -148,17 +192,28 @@ export async function call(
         `Ask the operator to raise TREG_MAX_USD_PER_CALL or get human approval for expensive calls.`,
     );
   }
-  return tregFetch<TregCallResult>("/v1/call", {
-    endpoint_id: endpointId,
-    params,
+
+  const hasBody = Object.keys(params).length > 0;
+  const res = await tregFetch<unknown>(`/call/${encodeURIComponent(endpointId)}`, {
+    method: hasBody ? "POST" : "GET",
+    body: hasBody ? params : undefined,
   });
+
+  return { data: res };
 }
 
 /**
  * Get the current Treg balance. WRITE-SCOPE — reveals spending info.
+ * Requires TREG_ORG_ID to be set if using an identity token (per-org tokens bake this in).
  */
 export async function balance(): Promise<TregBalanceResult> {
-  return tregFetch<TregBalanceResult>("/v1/balance");
+  if (!TREG_ORG_ID) {
+    throw new Error(
+      "Treg balance requires TREG_ORG_ID to be set. " +
+        "Per-org API tokens bake the org in, but TREG_ORG_ID is still needed for this endpoint.",
+    );
+  }
+  return tregFetch<TregBalanceResult>(`/orgs/${encodeURIComponent(TREG_ORG_ID)}/balance`);
 }
 
 // ── Logging for ops ────────────────────────────────────────────────────────────
