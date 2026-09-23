@@ -151,6 +151,21 @@ async function pullRebase(g: ReturnType<typeof vaultGit>, up: ReturnType<typeof 
 }
 
 /**
+ * Check if the remote branch exists. Returns false for empty repos (no commits on remote)
+ * or when the remote is unreachable.
+ */
+async function remoteBranchExists(g: ReturnType<typeof vaultGit>, remote: string, branch: string): Promise<boolean> {
+  try {
+    // `git ls-remote --heads <remote> <branch>` returns the ref if it exists, empty otherwise
+    const result = await g.listRemote(["--heads", remote, branch]);
+    return result.trim().length > 0;
+  } catch {
+    // Network error or remote not found — caller should attempt push anyway to get a real error
+    return false;
+  }
+}
+
+/**
  * Debounced commit + pull --rebase + push of one workspace. No-op unless git-sync is on
  * AND the workspace is its own git repo (see gitVaultDir).
  */
@@ -168,6 +183,8 @@ export interface SyncOutcome {
   pushed: boolean;
   /** The rebase conflicted and was aborted: the local commit is safe, the vault is behind. */
   conflicted?: boolean;
+  /** True when this was the first push to an empty remote repo. */
+  firstPush?: boolean;
   error?: string;
 }
 
@@ -204,6 +221,10 @@ async function abortRebaseIfAny(dir: string, g: ReturnType<typeof vaultGit>): Pr
  * Commit everything dirty in one workspace, then rebase onto the remote and push. Runs under
  * the git lock. Always returns an outcome — never `undefined` — so the caller can tell "ran"
  * from "skipped".
+ *
+ * Handles empty remote repos (first push): when the remote branch doesn't exist yet, skip the
+ * pull and push with `-u` to establish tracking. This is the common case when someone connects
+ * a brand-new empty GitHub repo and starts writing notes.
  */
 async function syncOnce(dir: string, reasons: string[]): Promise<SyncOutcome> {
   const out: SyncOutcome = { committed: false, pulled: false, pushed: false };
@@ -217,35 +238,62 @@ async function syncOnce(dir: string, reasons: string[]): Promise<SyncOutcome> {
     await g.commit(`brain: ${reasons.length} change(s) — ${reasons.slice(0, 3).join("; ")}`);
     out.committed = true;
 
-    // Commit FIRST, then rebase — so the working tree is clean and the rebase has nothing to
-    // stash. Deliberately no `--autostash`: see the note on pullWorkspace. If a write landed in
-    // the gap, `git pull --rebase` refuses on a dirty tree, which loses nothing; the next tick
-    // retries.
-    const before = await g.revparse(["HEAD"]).catch(() => "");
-    try {
-      await pullRebase(g, upstreamOf(status)); // committing does not move the branch or its upstream
-      out.pulled = true;
-      const after = await g.revparse(["HEAD"]).catch(() => "");
-      // A rebase that replayed our commit over remote work rewrote the tree; the index must
-      // follow. Previously only pullWorkspace rebuilt, so commits arriving down THIS path left
-      // search answering from pre-pull content until the watcher happened to catch up.
-      if (before !== after) rebuildIndex(vaultDir);
-    } catch (e) {
-      const aborted = await abortRebaseIfAny(vaultDir, g);
-      out.error = aborted
-        ? `vault diverged from its remote and the rebase conflicted; the local commit is intact but unpushed. Merge by hand. (${errText(e)})`
-        : errText(e);
-      out.conflicted = aborted;
-      console.error("[git] pull failed", e);
+    const up = upstreamOf(status);
+    if (!up) {
+      out.error = "vault HEAD is detached — check out a branch in the vault clone first";
+      console.error("[git] sync skipped: detached HEAD");
+      return out;
     }
-    // Pushing a detached HEAD or a half-finished rebase cannot help, and its failure would
-    // overwrite the conflict message with a less useful one.
+
+    // Check if this is an empty remote (first push scenario). When the remote branch doesn't
+    // exist, `git pull --rebase` fails with "Couldn't find remote ref" — skip it and push
+    // directly with -u to establish tracking.
+    const remoteExists = await remoteBranchExists(g, up.remote, up.branch);
+
+    if (remoteExists) {
+      // Normal case: pull --rebase to incorporate any remote changes, then push
+      const before = await g.revparse(["HEAD"]).catch(() => "");
+      try {
+        await pullRebase(g, up);
+        out.pulled = true;
+        const after = await g.revparse(["HEAD"]).catch(() => "");
+        if (before !== after) rebuildIndex(vaultDir);
+      } catch (e) {
+        const aborted = await abortRebaseIfAny(vaultDir, g);
+        out.error = aborted
+          ? `vault diverged from its remote and the rebase conflicted; the local commit is intact but unpushed. Merge by hand. (${errText(e)})`
+          : errText(e);
+        out.conflicted = aborted;
+        console.error("[git] pull failed", e);
+      }
+    } else {
+      // Empty remote: skip pull, will push with -u below
+      console.log(`[git] remote branch ${up.remote}/${up.branch} not found — first push to empty repo`);
+    }
+
+    // Push unless we're mid-conflict
     if (!out.conflicted) {
       try {
-        await g.push();
+        // Use -u (set-upstream) so future pushes work even if this is the first commit.
+        // This is idempotent: if tracking is already set, -u just confirms it.
+        await g.push(["-u", up.remote, up.branch]);
         out.pushed = true;
+        if (!remoteExists) {
+          out.firstPush = true;
+          console.log(`[git] first push to ${up.remote}/${up.branch} succeeded — tracking established`);
+        }
       } catch (e) {
-        out.error = errText(e);
+        const msg = errText(e);
+        // Provide actionable guidance for common push failures
+        if (msg.includes("Permission denied") || msg.includes("Authentication failed")) {
+          out.error = `push failed: authentication error. Check that the workspace token has write access to the repo. (${msg})`;
+        } else if (msg.includes("Repository not found")) {
+          out.error = `push failed: repository not found. The remote repo may have been deleted, or the token lacks access. (${msg})`;
+        } else if (msg.includes("remote rejected")) {
+          out.error = `push failed: remote rejected the push. Check branch protection rules. (${msg})`;
+        } else {
+          out.error = `push failed: ${msg}`;
+        }
         console.error("[git] push failed", e);
       }
     }
@@ -297,6 +345,11 @@ export function pendingReasons(dir: string): string[] {
   return [...syncState(dir).pending];
 }
 
+/** Get the last sync error for a workspace (cheap - no git calls). */
+export function getLastSyncError(dir: string): string | undefined {
+  return syncState(dir).lastError;
+}
+
 export async function syncStatus(dir: string) {
   const vaultDir = gitVaultDir(dir);
   if (!vaultDir || !gitSyncEnabled()) return { enabled: false as const };
@@ -306,19 +359,47 @@ export async function syncStatus(dir: string) {
   const pausedMs = gitPausedFor();
   const paused = pausedMs > 0 ? { paused: Math.ceil(pausedMs / 1000) } : {};
   try {
-    const { st, stashed } = await gitRead(`status:${vaultDir}`, STATUS_TTL_MS, async () => {
+    const result = await gitRead(`status:${vaultDir}`, STATUS_TTL_MS, async () => {
       const g = vaultGit(vaultDir);
       const st = await g.status();
-      // Stash entries are reported because nothing in Engram creates one any more. Any that exist
-      // are vault content the old `--autostash` pull stranded — recoverable with `git stash list`
-      // / `git stash pop`, but invisible until someone is told it is there.
-      const stashed = await g
-        .stashList()
-        .then((l) => l.total)
-        .catch(() => 0);
-      return { st, stashed };
+      const stashed = await g.stashList().then((l) => l.total).catch(() => 0);
+
+      // Detect "false green" scenario: git status shows ahead=0/behind=0 when there's no upstream.
+      // This happens with empty remote repos where origin/main doesn't exist yet.
+      let noUpstream = false;
+      let remoteEmpty = false;
+      let localCommits = 0;
+
+      // Check if tracking is set (e.g., "origin/main")
+      const hasTracking = !!st.tracking;
+      if (!hasTracking && st.current && !st.detached) {
+        noUpstream = true;
+        // Check if the remote branch exists at all
+        try {
+          const refs = await g.listRemote(["--heads", "origin", st.current]);
+          remoteEmpty = refs.trim().length === 0;
+        } catch {
+          remoteEmpty = true; // Network error or remote not found
+        }
+
+        // Count local commits that haven't been pushed
+        // For untracked branches, count all commits (since there's no remote to compare)
+        try {
+          const log = await g.log({ maxCount: 100 });
+          localCommits = log.total;
+        } catch {
+          // No commits at all (truly empty local repo)
+          localCommits = 0;
+        }
+      }
+
+      return { st, stashed, noUpstream, remoteEmpty, localCommits };
     });
-    return {
+
+    const { st, stashed, noUpstream, remoteEmpty, localCommits } = result;
+
+    // Build the response with clear diagnostics for the false-green scenario
+    const base = {
       enabled: true as const,
       dirty: st.files.length,
       ahead: st.ahead,
@@ -329,6 +410,23 @@ export async function syncStatus(dir: string) {
       ...paused,
       ...(s.lastError ? { lastError: s.lastError } : {}),
     };
+
+    // Surface upstream issues that cause the "synced but never pushed" false green
+    if (noUpstream) {
+      return {
+        ...base,
+        noUpstream: true,
+        ...(remoteEmpty ? { remoteEmpty: true } : {}),
+        ...(localCommits > 0 ? { localCommits, unpushed: true } : {}),
+        // Override ahead to show local commits when there's no upstream to compare against
+        ahead: localCommits,
+        warning: remoteEmpty
+          ? `Remote branch origin/${st.current} does not exist (empty repo). ${localCommits} local commit(s) have never been pushed. Trigger a sync to push.`
+          : `Branch has no upstream tracking. ${localCommits} local commit(s) may not be pushed.`,
+      };
+    }
+
+    return base;
   } catch {
     return { enabled: true as const, error: true, ...paused };
   }

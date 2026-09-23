@@ -2,7 +2,7 @@
 
 import useSWR, { useSWRConfig } from "swr";
 import { useState } from "react";
-import { Check, GitBranch, Pencil, Plus, Trash2, X } from "lucide-react";
+import { Check, Download, GitBranch, Pencil, Plus, Trash2, X } from "lucide-react";
 import { fetcher } from "@/lib/client";
 import { timeAgo } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -319,6 +319,17 @@ export default function WorkspacesPage() {
                       {busy === `switch-${r.id}` ? "Switching…" : "Switch to"}
                     </Button>
                   )}
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="size-8 text-muted-foreground"
+                    title="Download vault (.zip)"
+                    asChild
+                  >
+                    <a href={`/api/repos/${r.id}/export`} download>
+                      <Download size={14} />
+                    </a>
+                  </Button>
                   <Button size="icon" variant="ghost" className="size-8 text-muted-foreground" title="Rename" onClick={() => setEditing({ id: r.id, name: r.name })}>
                     <Pencil size={14} />
                   </Button>
@@ -330,10 +341,11 @@ export default function WorkspacesPage() {
                     </AlertDialogTrigger>
                     <AlertDialogContent>
                       <AlertDialogHeader>
-                        <AlertDialogTitle>Remove “{r.name}”?</AlertDialogTitle>
+                        <AlertDialogTitle>Remove &quot;{r.name}&quot;?</AlertDialogTitle>
                         <AlertDialogDescription>
-                          This removes the workspace and its local clone from Engram. Your GitHub repo and its history are untouched —
-                          you can re-add it anytime.
+                          <span className="font-semibold text-destructive">⚠️ This deletes the local clone and any unpushed notes!</span>
+                          {" "}Your GitHub repo is untouched, but notes that were never pushed will be lost.
+                          Download a backup first if you have unpushed changes.
                         </AlertDialogDescription>
                       </AlertDialogHeader>
                       <AlertDialogFooter>

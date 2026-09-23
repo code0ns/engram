@@ -1,4 +1,4 @@
-import { removeRepo, renameRepo, vaultDirFor } from "@/lib/repos";
+import { removeRepo, renameRepo, updateRepoToken, vaultDirFor } from "@/lib/repos";
 import { forgetWorkspace } from "@/lib/vault/store";
 import { getSession, isAllowed } from "@/lib/auth";
 import { dashboardAuthEnforced, grantedWorkspacesFor } from "@/lib/workspace-resolve";
@@ -25,6 +25,37 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   return Response.json({ ok: true, repo });
 }
 
+/**
+ * SAFE token update: refresh git credentials WITHOUT deleting the clone.
+ * Body: { token: "ghp_..." }
+ *
+ * Use this to fix 403/auth errors without losing unpushed notes.
+ * NEVER use delete+add to "reconnect" — that wipes the clone!
+ */
+export async function PUT(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  if (!(await canAccess(req, id))) return Response.json({ error: "not granted" }, { status: 403 });
+
+  const body = await req.json().catch(() => ({}));
+  const token = body?.token;
+  if (!token || typeof token !== "string" || !token.trim()) {
+    return Response.json({ error: "token required" }, { status: 400 });
+  }
+
+  const result = await updateRepoToken(id, token.trim());
+  if (!result.ok) {
+    return Response.json({ error: result.error }, { status: 400 });
+  }
+
+  return Response.json({ ok: true, repo: result.repo });
+}
+
+/**
+ * DANGER: DELETE removes the workspace AND deletes the entire vault clone!
+ * Any unpushed notes will be LOST.
+ *
+ * To fix auth errors, use PUT with a new token instead — it preserves the clone.
+ */
 export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   if (!(await canAccess(req, id))) return Response.json({ error: "not granted" }, { status: 403 });
