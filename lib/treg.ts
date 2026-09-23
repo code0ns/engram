@@ -61,11 +61,21 @@ export function isNumericOrgId(value: string): boolean {
   return /^\d+$/.test(value);
 }
 
-/** Org info returned by GET /orgs. */
-interface TregOrg {
-  id: number;
+/** Org info returned by GET /orgs — Treg may use `org_id` or `id` for the numeric identifier. */
+interface TregOrgRaw {
+  id?: number;
+  org_id?: number;
   slug?: string;
   name?: string;
+}
+
+/**
+ * Extract the numeric org ID from a raw Treg org object.
+ * Treg's API may use `org_id` or `id` as the field name.
+ */
+export function extractOrgId(org: TregOrgRaw): number | undefined {
+  const id = org.org_id ?? org.id;
+  return typeof id === "number" ? id : undefined;
 }
 
 /** In-process cache for resolved org ID (slug → numeric). */
@@ -100,17 +110,27 @@ export async function resolveOrgId(): Promise<number> {
   );
 
   if (!match) {
+    const available = orgs.map((o) => o.slug || o.name || extractOrgId(o) || "(unknown)").join(", ");
     throw new Error(
-      `Treg org slug "${TREG_ORG_ID}" not found. Available orgs: ${orgs.map((o) => o.slug || o.name || o.id).join(", ")}`,
+      `Treg org slug "${TREG_ORG_ID}" not found. Available orgs: ${available || "(none)"}`,
     );
   }
 
-  resolvedOrgIdCache = { slug: TREG_ORG_ID, numericId: match.id };
-  return match.id;
+  const numericId = extractOrgId(match);
+  if (numericId === undefined) {
+    throw new Error(
+      `Treg org "${TREG_ORG_ID}" matched but has no numeric ID. ` +
+        `Org data: ${JSON.stringify(match)}. ` +
+        `Expected field "org_id" or "id" with an integer value.`,
+    );
+  }
+
+  resolvedOrgIdCache = { slug: TREG_ORG_ID, numericId };
+  return numericId;
 }
 
 /** Fetch the list of orgs accessible to the current token. */
-async function fetchOrgs(): Promise<TregOrg[]> {
+async function fetchOrgs(): Promise<TregOrgRaw[]> {
   if (!tregEnabled()) {
     throw new Error("Treg is not configured — set TREG_TOKEN to enable.");
   }
@@ -139,7 +159,7 @@ async function fetchOrgs(): Promise<TregOrg[]> {
     throw new Error(msg);
   }
 
-  return res.json() as Promise<TregOrg[]>;
+  return res.json() as Promise<TregOrgRaw[]>;
 }
 
 /** Clear the org ID cache (for testing). */
