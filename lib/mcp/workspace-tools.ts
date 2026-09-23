@@ -162,7 +162,7 @@ export function listAccessibleWorkspaces(
  *
  * Returns error if the caller doesn't have access to the workspace or it doesn't exist.
  */
-export async function useWorkspace(
+export async function switchToWorkspace(
   caller: TokenCaller,
   workspaceId: string,
   setGlobalActive: boolean = false,

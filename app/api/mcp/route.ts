@@ -18,7 +18,7 @@ import {
   WORKSPACE_TOOL_MAP,
   WORKSPACE_TOOLS,
   listAccessibleWorkspaces,
-  useWorkspace,
+  switchToWorkspace,
 } from "@/lib/mcp/workspace-tools";
 
 export const dynamic = "force-dynamic";
@@ -118,7 +118,7 @@ async function handleMessage(
             if (!workspaceId) {
               out = { ok: false, error: "id is required" };
             } else {
-              out = await useWorkspace(caller.workspace, workspaceId, setGlobalActive);
+              out = await switchToWorkspace(caller.workspace, workspaceId, setGlobalActive);
             }
           } else {
             out = { error: `unknown workspace tool: ${toolName}` };

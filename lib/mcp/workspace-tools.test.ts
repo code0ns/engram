@@ -1,14 +1,10 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import fs from "node:fs";
-import path from "node:path";
-import crypto from "node:crypto";
 import {
   WORKSPACE_TOOLS,
   WORKSPACE_TOOL_MAP,
   listAccessibleWorkspaces,
-  useWorkspace,
+  switchToWorkspace,
   clearWorkspaceSelection,
-  type WorkspaceInfo,
 } from "./workspace-tools";
 import {
   selectWorkspace,
@@ -17,34 +13,6 @@ import {
 } from "./workspace-session";
 import { withActor } from "@/lib/actor";
 import type { TokenCaller, ResolvedWorkspace } from "@/lib/workspace-resolve";
-
-// Test data directory
-const TEST_DIR = path.join(process.cwd(), ".test-data", "workspace-tools");
-
-// Helper to mock repo/vault state for testing
-const mockRepos: Map<
-  string,
-  { id: string; name: string; fullName?: string; branch: string; active: boolean; hasContent: boolean }
-> = new Map();
-
-// Create a minimal mock vault directory
-function createMockVault(id: string, hasContent: boolean): void {
-  const dir = path.join(TEST_DIR, "vaults", id);
-  fs.mkdirSync(dir, { recursive: true });
-  // Create a .git directory to make it look like a cloned repo
-  fs.mkdirSync(path.join(dir, ".git"), { recursive: true });
-  if (hasContent) {
-    fs.writeFileSync(path.join(dir, "test-note.md"), "# Test Note\nSome content");
-  }
-}
-
-function cleanTestDir(): void {
-  try {
-    fs.rmSync(TEST_DIR, { recursive: true, force: true });
-  } catch {
-    // Ignore
-  }
-}
 
 describe("workspace tools surface", () => {
   test("every workspace tool has a name, description, and input schema", () => {
@@ -238,9 +206,9 @@ describe("workspace tools integration", () => {
     });
   });
 
-  test("useWorkspace returns error for non-existent workspace", async () => {
+  test("switchToWorkspace returns error for non-existent workspace", async () => {
     await withActor("test-agent", async () => {
-      const result = await useWorkspace({ kind: "shared" }, "non-existent-id");
+      const result = await switchToWorkspace({ kind: "shared" }, "non-existent-id");
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.error).toContain("not found");
