@@ -65,7 +65,11 @@ Call an endpoint through Treg. **This costs money.**
 
 #### HTTP Method Selection
 
-The HTTP method (GET, POST, etc.) is automatically determined from the catalog's `call_template`:
+The HTTP method (GET, POST, etc.) is automatically determined from the catalog in this priority order:
+
+1. **Top-level `method` field** — Preferred source (e.g., `"method": "GET"`)
+2. **Parsed from `call_template`** — Fallback if method field is missing (e.g., `--method GET`)
+3. **Default to POST** — Last resort for backward compatibility
 
 - **GET endpoints** (like Diffbot): `params` are sent as a query string
 - **POST endpoints** (like AnyAPI): `params` are sent as a JSON body
@@ -131,14 +135,14 @@ Agent: I need to extract the article from https://example.com/article
    → Returns: diffbot.x.extract-article @ $0.001/call
 
 2. tool_get("diffbot.x.extract-article")
-   → Returns: params { url: string }, call_template with --method GET
+   → Returns: params { url: string }, method: "GET" in catalog metadata
 
 3. tool_call("diffbot.x.extract-article", { url: "https://example.com/article" }, 0.001)
    → Sends: GET /call/diffbot.x.extract-article?url=https://example.com/article
    → Returns: { data: { title: "...", text: "...", ... }, usd_charged: 0.001 }
 ```
 
-The HTTP method is auto-detected from the catalog — you don't need to specify it.
+The HTTP method is auto-detected from the catalog's `method` field — you don't need to specify it.
 
 ## Spending Cap
 
