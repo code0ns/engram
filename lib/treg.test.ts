@@ -1,6 +1,7 @@
 import { describe, expect, test, beforeEach, afterEach, mock } from "bun:test";
 import {
   extractMethodFromTemplate,
+  normalizeHttpMethod,
   clearEndpointMethodCache,
   TREG_MAX_USD_PER_CALL,
 } from "./treg";
@@ -10,7 +11,8 @@ import {
  *
  * The key issue being fixed: GET endpoints that need query params (like Diffbot)
  * were incorrectly called with POST + JSON body because the old code inferred
- * method from "has body". Now we read the method from the catalog's `call_template`.
+ * method from "has body". Now we read the method from the catalog's top-level
+ * `method` field first, falling back to `call_template` parsing.
  */
 
 describe("extractMethodFromTemplate", () => {
@@ -73,6 +75,46 @@ describe("extractMethodFromTemplate", () => {
   });
 });
 
+describe("normalizeHttpMethod", () => {
+  test("normalizes valid GET method", () => {
+    expect(normalizeHttpMethod("GET")).toBe("GET");
+    expect(normalizeHttpMethod("get")).toBe("GET");
+    expect(normalizeHttpMethod("Get")).toBe("GET");
+  });
+
+  test("normalizes valid POST method", () => {
+    expect(normalizeHttpMethod("POST")).toBe("POST");
+    expect(normalizeHttpMethod("post")).toBe("POST");
+  });
+
+  test("normalizes valid PUT method", () => {
+    expect(normalizeHttpMethod("PUT")).toBe("PUT");
+    expect(normalizeHttpMethod("put")).toBe("PUT");
+  });
+
+  test("normalizes valid PATCH method", () => {
+    expect(normalizeHttpMethod("PATCH")).toBe("PATCH");
+    expect(normalizeHttpMethod("patch")).toBe("PATCH");
+  });
+
+  test("normalizes valid DELETE method", () => {
+    expect(normalizeHttpMethod("DELETE")).toBe("DELETE");
+    expect(normalizeHttpMethod("delete")).toBe("DELETE");
+  });
+
+  test("returns undefined for invalid methods", () => {
+    expect(normalizeHttpMethod("INVALID")).toBeUndefined();
+    expect(normalizeHttpMethod("HEAD")).toBeUndefined();
+    expect(normalizeHttpMethod("OPTIONS")).toBeUndefined();
+  });
+
+  test("returns undefined for empty/null/undefined input", () => {
+    expect(normalizeHttpMethod("")).toBeUndefined();
+    expect(normalizeHttpMethod(null)).toBeUndefined();
+    expect(normalizeHttpMethod(undefined)).toBeUndefined();
+  });
+});
+
 describe("clearEndpointMethodCache", () => {
   beforeEach(() => {
     clearEndpointMethodCache();
@@ -117,6 +159,20 @@ describe("HTTP method selection behavior", () => {
       fetchCalls.push({ url, options: init ?? {} });
 
       if (url.includes("/catalog/endpoints/")) {
+        // Diffbot-style catalog: method field at top level, call_template uses --query (no --method)
+        if (url.includes("diffbot.x.extract-article")) {
+          return new Response(
+            JSON.stringify({
+              id: "diffbot.x.extract-article",
+              provider: "diffbot",
+              name: "Extract Article",
+              method: "GET",
+              call_template: "treg call diffbot.x.extract-article --query url=https://...",
+              cost: { usd: 0.001196 },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
         return new Response(
           JSON.stringify({
             id: "test-endpoint",
@@ -151,6 +207,26 @@ describe("HTTP method selection behavior", () => {
     expect(callRequest!.options.method).toBe("GET");
     expect(callRequest!.url).toContain("url=https");
     expect(callRequest!.url).toContain("timeout=30");
+    expect(callRequest!.options.body).toBeUndefined();
+  });
+
+  test.skipIf(!process.env.TREG_TOKEN)("Diffbot-shaped catalog: uses top-level method field, not call_template", async () => {
+    // This test verifies the fix for PR #8's incomplete implementation.
+    // Diffbot's catalog returns:
+    //   - method: "GET" (top-level field)
+    //   - call_template: "treg call ... --query url=..." (no --method flag)
+    // The old code only parsed call_template and fell back to POST.
+    // The fix prefers the top-level `method` field.
+    const { call } = await import("./treg");
+
+    await call("diffbot.x.extract-article", { url: "https://example.com/article" });
+
+    const callRequest = fetchCalls.find((c) => c.url.includes("/call/diffbot.x.extract-article"));
+    expect(callRequest).toBeDefined();
+    // Should use GET from the top-level method field, not POST (the default when call_template has no --method)
+    expect(callRequest!.options.method).toBe("GET");
+    // Params should be in query string, not body
+    expect(callRequest!.url).toContain("url=https");
     expect(callRequest!.options.body).toBeUndefined();
   });
 

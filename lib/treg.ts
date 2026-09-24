@@ -51,6 +51,21 @@ export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 const BODY_METHODS: HttpMethod[] = ["POST", "PUT", "PATCH"];
 
+const VALID_HTTP_METHODS: HttpMethod[] = ["GET", "POST", "PUT", "PATCH", "DELETE"];
+
+/**
+ * Normalize an HTTP method string to a valid HttpMethod type.
+ * Returns undefined if the input is not a recognized HTTP method.
+ */
+export function normalizeHttpMethod(method: string | undefined | null): HttpMethod | undefined {
+  if (!method) return undefined;
+  const upper = method.toUpperCase();
+  if (VALID_HTTP_METHODS.includes(upper as HttpMethod)) {
+    return upper as HttpMethod;
+  }
+  return undefined;
+}
+
 /**
  * Extract the HTTP method from a Treg catalog `call_template` string.
  * Templates look like: `treg call endpoint-id --method GET --url "..." ...`
@@ -60,11 +75,7 @@ export function extractMethodFromTemplate(callTemplate: string | undefined): Htt
   if (!callTemplate) return undefined;
   const match = callTemplate.match(/--method\s+(\w+)/i);
   if (!match) return undefined;
-  const method = match[1].toUpperCase();
-  if (["GET", "POST", "PUT", "PATCH", "DELETE"].includes(method)) {
-    return method as HttpMethod;
-  }
-  return undefined;
+  return normalizeHttpMethod(match[1]);
 }
 
 /**
@@ -75,7 +86,14 @@ const endpointMethodCache = new Map<string, HttpMethod>();
 
 /**
  * Get the HTTP method for an endpoint. Uses cache, falls back to catalog lookup.
- * Returns "POST" as default if method cannot be determined (backward compatible).
+ *
+ * Method resolution order:
+ * 1. Catalog's top-level `method` field (e.g., `method: "GET"`)
+ * 2. Parsed from `call_template` (e.g., `--method GET`)
+ * 3. Default to "POST" for backward compatibility
+ *
+ * This fixes endpoints like Diffbot where the catalog returns `method: "GET"`
+ * but the `call_template` uses `--query` instead of `--method GET`.
  */
 export async function getEndpointMethod(endpointId: string): Promise<HttpMethod> {
   const cached = endpointMethodCache.get(endpointId);
@@ -83,7 +101,10 @@ export async function getEndpointMethod(endpointId: string): Promise<HttpMethod>
 
   try {
     const info = await catalogGet(endpointId);
-    const method = extractMethodFromTemplate(info.call_template) ?? "POST";
+    const method =
+      normalizeHttpMethod(info.method) ??
+      extractMethodFromTemplate(info.call_template) ??
+      "POST";
     endpointMethodCache.set(endpointId, method);
     return method;
   } catch {
@@ -238,6 +259,8 @@ export interface TregCatalogEndpoint {
   name: string;
   summary?: string;
   cost?: TregCatalogEndpointCost;
+  /** Alternative price field sometimes returned by Treg. */
+  usd_per_call?: number;
   platform_eligible?: boolean;
   observed?: {
     ok_rate?: number;
@@ -259,6 +282,10 @@ export interface TregCatalogGetResult {
   name: string;
   summary?: string;
   cost?: TregCatalogEndpointCost;
+  /** Top-level HTTP method from catalog (e.g., "GET", "POST"). Preferred over call_template parsing. */
+  method?: string;
+  /** Alternative price field sometimes returned by Treg. */
+  usd_per_call?: number;
   platform_eligible?: boolean;
   input?: Record<string, unknown>;
   output?: Record<string, unknown>;

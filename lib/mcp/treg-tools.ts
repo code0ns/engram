@@ -49,7 +49,8 @@ export const TREG_TOOLS: Tool[] = [
             provider: e.provider,
             name: e.name,
             description: e.summary,
-            usd_per_call: e.cost?.usd,
+            // Treg returns cost in multiple possible locations: cost.usd or top-level usd_per_call
+            usd_per_call: e.cost?.usd ?? e.usd_per_call,
             no_key_needed: e.platform_eligible,
             reliability: e.observed?.ok_rate,
           })),
@@ -79,7 +80,8 @@ export const TREG_TOOLS: Tool[] = [
       try {
         const result = await catalogGet(String(endpoint_id));
         logTregCall("get", { endpointId: String(endpoint_id), success: true });
-        const usdPerCall = result.cost?.usd ?? 0;
+        // Treg returns cost in multiple possible locations: cost.usd or top-level usd_per_call
+        const usdPerCall = result.cost?.usd ?? result.usd_per_call ?? 0;
         return {
           endpoint_id: result.id,
           provider: result.provider,

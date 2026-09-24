@@ -140,6 +140,24 @@ describe("HTTP method handling", () => {
   });
 });
 
+describe("HTTP method detection priority", () => {
+  test("normalizeHttpMethod normalizes valid methods", async () => {
+    const { normalizeHttpMethod } = await import("@/lib/treg");
+    expect(normalizeHttpMethod("GET")).toBe("GET");
+    expect(normalizeHttpMethod("get")).toBe("GET");
+    expect(normalizeHttpMethod("POST")).toBe("POST");
+    expect(normalizeHttpMethod("post")).toBe("POST");
+  });
+
+  test("normalizeHttpMethod returns undefined for invalid methods", async () => {
+    const { normalizeHttpMethod } = await import("@/lib/treg");
+    expect(normalizeHttpMethod("INVALID")).toBeUndefined();
+    expect(normalizeHttpMethod("")).toBeUndefined();
+    expect(normalizeHttpMethod(undefined)).toBeUndefined();
+    expect(normalizeHttpMethod(null)).toBeUndefined();
+  });
+});
+
 describe("Treg price cap", () => {
   test("call refuses when estimated_usd exceeds cap", async () => {
     const { call, TREG_MAX_USD_PER_CALL } = await import("@/lib/treg");
