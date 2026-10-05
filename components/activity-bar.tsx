@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Activity, Bot, GitBranch, Home, Network, Plug, Settings, Shield } from "lucide-react";
+import { Activity, GitBranch, Home, Network, Plug, Settings, Shield } from "lucide-react";
 import { ThemeToggle } from "./theme-toggle";
 
 const ITEMS = [
@@ -11,7 +11,6 @@ const ITEMS = [
   { href: "/graph", icon: Network, label: "Graph" },
   { href: "/workspaces", icon: GitBranch, label: "Workspaces" },
   { href: "/access", icon: Shield, label: "Access" },
-  { href: "/agents", icon: Bot, label: "Agents (Paperclip)" },
   { href: "/connect", icon: Plug, label: "Connect an agent" },
   { href: "/settings", icon: Settings, label: "Settings" },
 ];
