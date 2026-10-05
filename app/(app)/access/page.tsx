@@ -1,7 +1,7 @@
 "use client";
 
-import { Suspense } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PeopleTab } from "@/components/access/people-tab";
 import { WorkspacesTab } from "@/components/access/workspaces-tab";
@@ -14,15 +14,28 @@ const TABS = [
 ] as const;
 type TabId = (typeof TABS)[number]["id"];
 
-/** The active tab lives in the URL (?tab=) so it survives reloads and old /workspaces and /connect links. */
+/**
+ * The tab is mirrored in the URL (?tab=) so it survives reloads and the old /workspaces and
+ * /connect redirects, but clicking a tab is plain local state — it must not depend on a router
+ * navigation (router.replace silently did nothing on the production build). The URL is updated in
+ * place with history.replaceState, which Next keeps in sync with useSearchParams.
+ */
 function AccessTabs() {
-  const router = useRouter();
   const params = useSearchParams();
   const raw = params.get("tab");
-  const tab: TabId = TABS.some((t) => t.id === raw) ? (raw as TabId) : "people";
+  const urlTab: TabId = TABS.some((t) => t.id === raw) ? (raw as TabId) : "people";
+
+  // A click wins until the URL itself changes (e.g. a link elsewhere points at another tab).
+  const [picked, setPicked] = useState<{ from: TabId; tab: TabId } | null>(null);
+  const tab = picked && picked.from === urlTab ? picked.tab : urlTab;
+
+  function select(next: string) {
+    setPicked({ from: urlTab, tab: next as TabId });
+    window.history.replaceState(null, "", `/access?tab=${next}`);
+  }
 
   return (
-    <Tabs value={tab} onValueChange={(v) => router.replace(`/access?tab=${v}`, { scroll: false })} className="mt-6">
+    <Tabs value={tab} onValueChange={select} className="mt-6">
       <TabsList>
         {TABS.map((t) => (
           <TabsTrigger key={t.id} value={t.id}>
