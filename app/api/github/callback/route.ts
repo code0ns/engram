@@ -18,12 +18,14 @@ export async function GET(req: Request) {
   const code = url.searchParams.get("code");
   const state = url.searchParams.get("state");
   const cookies = parseCookies(req.headers.get("cookie") || "");
-  if (!code || !state || cookies.gh_state !== state) return redirect("/workspaces?error=state");
+  if (!code || !state || cookies.gh_state !== state) return redirect("/access?tab=workspaces&error=state");
 
   const token = await exchangeGithubCode(code);
-  if (!token) return redirect("/workspaces?error=github");
+  if (!token) return redirect("/access?tab=workspaces&error=github");
   await connectGithub(token);
 
-  const next = cookies.gh_next ? decodeURIComponent(cookies.gh_next) : "/workspaces";
-  return redirect(next.startsWith("/") ? next : "/workspaces");
+  const fallback = "/access?tab=workspaces";
+  const next = cookies.gh_next ? decodeURIComponent(cookies.gh_next) : fallback;
+  // A same-site path only: "//host" would be a protocol-relative redirect off-site.
+  return redirect(next.startsWith("/") && !next.startsWith("//") ? next : fallback);
 }

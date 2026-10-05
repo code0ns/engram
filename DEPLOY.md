@@ -86,18 +86,25 @@ allowlist**; approve and you're connected — no open endpoint, no shared secret
 Claude plan (and, on Team/Enterprise, an admin to enable custom connectors).
 
 ## 6. (Optional) Treg API Gateway — external APIs through Engram
-Expose [Treg's](https://treg.ai) catalog of 2,600+ external API endpoints through Engram's MCP.
+Expose [Treg's](https://treg.to) catalog of 2,600+ external API endpoints through Engram's MCP.
 Clients that only connect to Engram can search, inspect, and call cheap external APIs without a
 separate Treg connector.
 
-**Railway → Variables:**
+**Railway → Variables** (these are the *defaults*; each workspace can override its own token and
+limits from **Access → Workspaces → ⚙ settings**, admins only):
 | Variable | Value |
 |---|---|
-| `TREG_TOKEN` | Your Treg API token (required to enable) |
-| `TREG_BASE_URL` | API base URL (default: `https://api.treg.ai`) |
+| `TREG_TOKEN` | Shared Treg API token — used by any workspace without its own token |
+| `TREG_BASE_URL` | API base URL (default: `https://treg.to`) |
+| `TREG_ORG_ID` | Org ID or team slug (only the balance tool needs it) |
 | `TREG_MAX_USD_PER_CALL` | Max cost per call (default: `0.01`) — calls above this are refused |
+| `TREG_MAX_USD_PER_DAY` | Max spend per workspace per UTC day (default: `1.00`) |
 
-When `TREG_TOKEN` is set, four new MCP tools appear:
+Spend limits are enforced on the server from the **catalog price**, not the agent's estimate, and
+tracked per workspace in `treg-ledger.json`. Tokens set in the dashboard are stored encrypted in
+`treg.json` (keyed off `AUTH_SECRET`) and are never sent back to the browser.
+
+When a workspace has a Treg token (its own or the shared one), four new MCP tools appear:
 - **`tool_search`** (read) — search the catalog by task description
 - **`tool_get`** (read) — get full endpoint details + exact price
 - **`tool_call`** (write) — call an endpoint (costs money)
@@ -114,7 +121,16 @@ reveal balance).
 3. tool_call("geocoding-reverse-v1", {lat: 40.7, lon: -74}, 0.0005) → result
 ```
 
-Without `TREG_TOKEN`, the tools are hidden entirely (not erroring) — same pattern as `brain_capture`.
+With no token for a workspace (none of its own and no `TREG_TOKEN`), the tools are hidden entirely
+(not erroring) — same pattern as `brain_capture`.
+
+## 7. Admins
+The **Access** page has three tabs: People, Workspaces, Agent connections. Changing who has access,
+adding/renaming/deleting workspaces, and editing a workspace's git or Treg token and limits are
+**admin-only**; everyone else can use the workspaces they're granted. Admin is an explicit flag you
+can see and toggle on the People tab. The first time the page is used, the first address in
+`ALLOWED_EMAILS` is recorded as the admin — after that nothing depends on env ordering. The last
+admin can't be removed or demoted.
 
 ## Notes
 - **No auth locally:** leave `AUTH_SECRET` empty (or `AUTH_DISABLED=true`) and the dashboard is open; the MCP is open until a token exists.

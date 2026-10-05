@@ -2,16 +2,14 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Activity, GitBranch, Home, Network, Plug, Settings, Shield } from "lucide-react";
+import { Activity, Home, Network, Settings, Shield } from "lucide-react";
 import { ThemeToggle } from "./theme-toggle";
 
 const ITEMS = [
   { href: "/", icon: Home, label: "Home", exact: true },
   { href: "/activity", icon: Activity, label: "Activity" },
   { href: "/graph", icon: Network, label: "Graph" },
-  { href: "/workspaces", icon: GitBranch, label: "Workspaces" },
-  { href: "/access", icon: Shield, label: "Access" },
-  { href: "/connect", icon: Plug, label: "Connect an agent" },
+  { href: "/access", icon: Shield, label: "Access — people, workspaces, agents" },
   { href: "/settings", icon: Settings, label: "Settings" },
 ];
 

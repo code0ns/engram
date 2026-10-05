@@ -1,25 +1,32 @@
 # Treg API Gateway
 
 Engram can proxy [Treg's](https://treg.to) external API catalog, letting clients that only connect
-to Engram discover and call 3,600+ external APIs without a separate Treg MCP connector.
+to Engram discover and call 2,600+ external APIs without a separate Treg MCP connector.
 
 ## Setup
 
-Set these environment variables on Railway (or your host):
+Credentials and limits are **per workspace**, falling back to server-wide defaults.
+
+**1. Server defaults (Railway → Variables, or your host's env):**
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `TREG_TOKEN` | Yes | — | Your Treg API token |
+| `TREG_TOKEN` | For the shared fallback | — | Treg API token used by any workspace without its own |
 | `TREG_BASE_URL` | No | `https://treg.to` | Treg API base URL |
 | `TREG_ORG_ID` | For balance | — | Treg org ID **or team slug** (per-org tokens bake this in) |
-| `TREG_MAX_USD_PER_CALL` | No | `0.01` | Maximum cost per `tool_call` |
+| `TREG_MAX_USD_PER_CALL` | No | `0.01` | Default maximum cost of one `tool_call` |
+| `TREG_MAX_USD_PER_DAY` | No | `1.00` | Default maximum spend per workspace per UTC day |
 
 > **Tip**: `TREG_ORG_ID` accepts either a numeric org ID (e.g. `12345`) or a team slug
 > (e.g. `harold-builds`). When a slug is provided, Engram resolves it to the numeric ID
-> by calling `GET /orgs` and caches the result for the server lifetime.
+> by calling `GET /orgs` and caches the result per credential.
 
-When `TREG_TOKEN` is unset, the Treg tools are hidden from the MCP surface entirely — matching
-how `brain_capture` is hidden when the Curator is off.
+**2. Per workspace (admins only):** *Access → Workspaces → ⚙ settings → Tool budget (Treg)*. Set the
+workspace's own token, org, per-call cap and daily cap. Anything left blank uses the server default
+above. This is what separates one client's Treg wallet and limits from another's.
+
+If a workspace has no token of its own and `TREG_TOKEN` is unset, the Treg tools are hidden from
+that workspace's MCP surface entirely — matching how `brain_capture` is hidden when the Curator is off.
 
 ## MCP Tools
 
@@ -45,8 +52,8 @@ Get full details for an endpoint before calling it.
 }
 ```
 
-Returns the full parameter schema, response schema, and exact price. If the price exceeds
-`TREG_MAX_USD_PER_CALL`, the response includes a warning.
+Returns the full parameter schema, response schema, and exact price, plus a hint with this
+workspace's caps and how much of today's budget is left. If the price exceeds a cap, the hint warns.
 
 ### `tool_call` (write scope)
 Call an endpoint through Treg. **This costs money.**
@@ -59,8 +66,11 @@ Call an endpoint through Treg. **This costs money.**
 }
 ```
 
-- Calls exceeding `TREG_MAX_USD_PER_CALL` are refused with a clear error
-- Pass `estimated_usd` (from `tool_get`) to enforce the spending cap
+- `estimated_usd` is advisory. The server enforces the **catalog price** (the larger of the two)
+- Refused when that price exceeds the workspace's per-call cap, or when today's spend plus this call
+  would exceed its daily cap
+- Spend is reserved before the request and settled to the real charge afterwards; a failed call is
+  not charged
 - Returns `data`, `call_id`, and `usd_charged`
 
 #### HTTP Method Selection
@@ -88,13 +98,14 @@ an endpoint with incorrect catalog metadata), pass `method`:
 Valid methods: `GET`, `POST`, `PUT`, `PATCH`, `DELETE`.
 
 ### `tool_balance` (write scope)
-Check the Treg account balance.
+Check the Treg account balance for the workspace's token.
 
 ```json
 {}
 ```
 
-Returns `balance_usd` and `currency`. Write-scope because it reveals spending information.
+Returns `balance_usd`, `currency`, plus `spent_today_usd` and `daily_cap_usd`. Write-scope because it
+reveals spending information.
 
 ## Scope Rules
 
@@ -144,36 +155,47 @@ Agent: I need to extract the article from https://example.com/article
 
 The HTTP method is auto-detected from the catalog's `method` field — you don't need to specify it.
 
-## Spending Cap
+## Spending Caps
 
-The `TREG_MAX_USD_PER_CALL` cap (default $0.01) prevents accidental expensive calls:
+Two caps apply to every workspace, both enforced on the server:
 
-- `tool_call` refuses requests where `estimated_usd` exceeds the cap
-- `tool_get` warns when an endpoint's price exceeds the cap
-- Error messages tell the agent to get human approval or ask the operator to raise the cap
+| Cap | Default | Meaning |
+|---|---|---|
+| Per call | `$0.01` | A single call whose price is above this is refused |
+| Per day | `$1.00` | Calls are refused once today's (UTC) spend plus the call would exceed this |
 
-To raise the cap:
+The price used is the larger of the agent's `estimated_usd` and the **catalog's own price**, so an
+agent cannot get past a cap by omitting or understating the estimate. If the catalog price can't be
+read, the call is refused (pass both `estimated_usd` and `method` to proceed deliberately).
+
+To change them: *Access → Workspaces → ⚙ settings* (admins), or set the server-wide defaults:
 ```bash
 # Railway → Variables
-TREG_MAX_USD_PER_CALL=0.10  # Allow up to $0.10 per call
+TREG_MAX_USD_PER_CALL=0.10   # allow up to $0.10 per call
+TREG_MAX_USD_PER_DAY=5       # allow up to $5/day per workspace
 ```
+
+Spend is tracked per workspace in `treg-ledger.json` under `ENGRAM_DATA_DIR` (35 days kept).
 
 ## Logging
 
 Treg calls are logged for ops visibility:
 
 ```
-[treg] search ok
-[treg] get endpoint=geocoding-reverse-v1 ok
-[treg] call endpoint=geocoding-reverse-v1 usd=0.0005 ok
-[treg] call endpoint=expensive-v1 usd=0.5000 fail: exceeds the cap
+[treg] search ws=ws-acme ok
+[treg] get ws=ws-acme endpoint=geocoding-reverse-v1 ok
+[treg] call ws=ws-acme endpoint=geocoding-reverse-v1 usd=0.0005 ok
+[treg] call ws=ws-acme endpoint=expensive-v1 usd=0.5000 fail: exceeds the cap
 ```
 
-Logs include endpoint ID and cost estimate, but never the Treg token or request/response bodies.
+Logs include workspace, endpoint ID and cost, but never the Treg token or request/response bodies.
 
 ## Security
 
-- The `TREG_TOKEN` is used server-side only — never exposed in MCP responses
-- Token is not stored in the vault or in any client-accessible location
-- Spending is gated by both scope (`write` required) and cost cap (`TREG_MAX_USD_PER_CALL`)
+- Tokens are used server-side only — never exposed in MCP responses or returned to the browser
+  (the dashboard only learns *whether* a token is set)
+- A token set from the dashboard is stored encrypted (keyed off `AUTH_SECRET`) in `treg.json`
+  under `ENGRAM_DATA_DIR`, never in a vault repo
+- Changing a workspace's token or limits is admin-only
+- Spending is gated by scope (`write` required), the per-call cap and the daily cap
 - Balance visibility requires `write` scope (reveals spending information)

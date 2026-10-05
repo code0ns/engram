@@ -105,7 +105,7 @@ export function WorkspaceSwitcher() {
               </button>
             ))}
             <Link
-              href="/workspaces"
+              href="/access?tab=workspaces"
               onClick={() => setOpen(false)}
               className="mt-1 flex items-center gap-2 border-t border-border px-2 pb-1 pt-2 text-xs text-muted-foreground transition-colors hover:text-foreground"
             >

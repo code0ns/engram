@@ -200,7 +200,7 @@ export default function Home() {
                 ok={false}
                 state="not connected"
                 desc="Connect a git repo of markdown — the source of truth for humans and agents. Start here."
-                href="/workspaces"
+                href="/access?tab=workspaces"
                 cta="Connect a repo"
               />
               <LinkPillar
@@ -209,7 +209,7 @@ export default function Home() {
                 ok={tokenCount > 0}
                 state={tokenCount > 0 ? `${tokenCount} token${tokenCount === 1 ? "" : "s"}` : "none yet"}
                 desc="Point Claude Code, Cursor, Hermes, or Claude.ai at the MCP endpoint to read + write this brain."
-                href="/connect"
+                href="/access?tab=connections"
                 cta={tokenCount > 0 ? "Manage" : "Connect an agent"}
               />
               <TogglePillar

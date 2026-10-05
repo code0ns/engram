@@ -181,7 +181,7 @@ export default function SettingsPage() {
             <p className="mt-1 text-xs text-muted-foreground">
               Engram&apos;s built-in harness — its own agent over your vault. This does not control
               whether your <em>external</em> agents can edit notes; a token&apos;s scope does, on the
-              Connect page.
+              Access page (Agent connections tab).
             </p>
           </div>
 

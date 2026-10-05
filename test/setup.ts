@@ -32,3 +32,5 @@ process.env.GIT_SYNC_ENABLED = "false";
 // A fixed allowlist for the access-control tests (config.ts reads it at import time too). The first
 // address is the bootstrap owner/admin.
 process.env.ALLOWED_EMAILS = "owner@test.dev,colleague@test.dev,other@test.dev";
+// Dashboard auth is "enforced" whenever AUTH_SECRET is set — lets route tests mint real session cookies.
+process.env.AUTH_SECRET = "test-only-auth-secret-not-for-production";
