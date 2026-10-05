@@ -9,7 +9,23 @@ The app is taxonomy-agnostic — it renders whatever folders exist; this documen
 
 ## Folders
 `clients/` · `decisions/` · `projects/` · `people/` · `meetings/` · `docs/` · `research/` ·
-`inbox/` (unsorted captures) · `archive/` (see below). Slugs are kebab-case. New folders are allowed.
+`inbox/` (unsorted captures) · `archive/` (see below) · `tools/` (saved API recipes, see below) ·
+`skills/` (agent skills, see below). Slugs are kebab-case. New folders are allowed. Folders whose
+name starts with a dot are not indexed.
+
+## Tool recipes — `tools/<provider>/`
+
+A recipe is a known-good external API call, saved with `tool_recipe_save` so `tool_search` finds it
+before searching the paid catalog. Frontmatter: `provider`, `endpoint` (the Treg endpoint id),
+`method`, `price_usd`, `params_example`, `task`, `last_verified`. A recipe not verified for 90 days is
+reported as stale: re-check it with `tool_get`. Save recipes you will reuse, not every call: each save
+is a git commit.
+
+## Skills — `skills/<name>/SKILL.md`
+
+A skill is a folder with a `SKILL.md` (frontmatter `name`, `description`, `model`) and optional
+reference files linked from it. See `skills/skill-builder/SKILL.md` for how to write one, and run
+`skill_lint` on the folder before saving.
 
 ## Frontmatter (YAML, optional)
 ```yaml
