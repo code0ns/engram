@@ -1,15 +1,18 @@
 import { describe, expect, test, beforeEach, afterEach, mock } from "bun:test";
 import {
+  call,
   extractMethodFromTemplate,
   normalizeHttpMethod,
   clearEndpointMethodCache,
   TREG_MAX_USD_PER_CALL,
+  type TregConfig,
 } from "./treg";
+import { spentToday } from "./treg-config";
 
 /**
- * Tests for Treg HTTP method handling.
+ * Tests for Treg HTTP method handling and spend enforcement.
  *
- * The key issue being fixed: GET endpoints that need query params (like Diffbot)
+ * The key issue being fixed for methods: GET endpoints that need query params (like Diffbot)
  * were incorrectly called with POST + JSON body because the old code inferred
  * method from "has body". Now we read the method from the catalog's top-level
  * `method` field first, falling back to `call_template` parsing.
@@ -135,72 +138,88 @@ describe("Treg price cap", () => {
   });
 });
 
+function cfg(over: Partial<TregConfig> = {}): TregConfig {
+  return {
+    token: "test-token",
+    baseUrl: "https://treg.test",
+    orgId: "",
+    perCallCapUsd: 1,
+    dailyCapUsd: 100,
+    // Unique per test: the ledger is a file shared by the whole run.
+    ledgerKey: `test-ws-${crypto.randomUUID()}`,
+    source: "workspace",
+    ...over,
+  };
+}
+
+interface FakeEndpoint {
+  price?: number;
+  method?: string;
+  template?: string;
+  callStatus?: number;
+  callBody?: unknown;
+}
+
 /**
- * Integration tests for HTTP method selection require mocking fetch.
- * These tests verify that:
- * 1. GET endpoints pass params as query string
- * 2. POST endpoints pass params as JSON body
- * 3. Method override works correctly
- *
- * Since these require network mocking, they're in a separate describe block
- * that can be skipped in environments without fetch mocking support.
+ * Integration tests with a mocked fetch: HTTP method selection, plus the spend enforcement
+ * (authoritative catalog price, per-call cap, daily cap with reserve / settle / refund).
  */
-describe("HTTP method selection behavior", () => {
+describe("Treg calls (mocked fetch)", () => {
   let originalFetch: typeof globalThis.fetch;
   let fetchCalls: { url: string; options: RequestInit }[];
+  let endpoints: Record<string, FakeEndpoint>;
 
   beforeEach(() => {
     clearEndpointMethodCache();
     fetchCalls = [];
+    endpoints = {
+      "get-endpoint": { template: "treg call get-endpoint --method GET" },
+      "post-endpoint": { template: "treg call post-endpoint --method POST" },
+      "diffbot.x.extract-article": {
+        method: "GET",
+        template: "treg call diffbot.x.extract-article --query url=https://...",
+        price: 0.001196,
+      },
+    };
     originalFetch = globalThis.fetch;
 
     globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
       fetchCalls.push({ url, options: init ?? {} });
+      const json = (body: unknown, status = 200) =>
+        new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
-      if (url.includes("/catalog/endpoints/")) {
-        // Diffbot-style catalog: method field at top level, call_template uses --query (no --method)
-        if (url.includes("diffbot.x.extract-article")) {
-          return new Response(
-            JSON.stringify({
-              id: "diffbot.x.extract-article",
-              provider: "diffbot",
-              name: "Extract Article",
-              method: "GET",
-              call_template: "treg call diffbot.x.extract-article --query url=https://...",
-              cost: { usd: 0.001196 },
-            }),
-            { status: 200, headers: { "Content-Type": "application/json" } },
-          );
-        }
-        return new Response(
-          JSON.stringify({
-            id: "test-endpoint",
-            provider: "test",
-            name: "Test",
-            call_template: url.includes("get-endpoint")
-              ? "treg call get-endpoint --method GET"
-              : "treg call post-endpoint --method POST",
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        );
+      const cat = url.match(/\/catalog\/endpoints\/([^?]+)/);
+      if (cat) {
+        const id = decodeURIComponent(cat[1]);
+        const e = endpoints[id];
+        if (!e) return json({ id, provider: "test", name: id }); // priceless, methodless
+        return json({
+          id,
+          provider: "test",
+          name: id,
+          method: e.method,
+          call_template: e.template,
+          cost: e.price === undefined ? undefined : { usd: e.price },
+        });
       }
 
-      if (url.includes("/call/")) {
-        return new Response(JSON.stringify({ data: "ok" }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
+      const callM = url.match(/\/call\/([^?]+)/);
+      if (callM) {
+        const e = endpoints[decodeURIComponent(callM[1])] ?? {};
+        return json(e.callBody ?? { data: "ok" }, e.callStatus ?? 200);
       }
 
       return new Response("Not Found", { status: 404 });
     }) as typeof globalThis.fetch;
   });
 
-  test.skipIf(!process.env.TREG_TOKEN)("GET endpoint: params sent as query string, not body", async () => {
-    const { call } = await import("./treg");
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
 
-    await call("get-endpoint", { url: "https://example.com", timeout: 30 });
+  test("GET endpoint: params sent as query string, not body", async () => {
+    await call(cfg(), "get-endpoint", { url: "https://example.com", timeout: 30 });
 
     const callRequest = fetchCalls.find((c) => c.url.includes("/call/get-endpoint"));
     expect(callRequest).toBeDefined();
@@ -210,92 +229,126 @@ describe("HTTP method selection behavior", () => {
     expect(callRequest!.options.body).toBeUndefined();
   });
 
-  test.skipIf(!process.env.TREG_TOKEN)("Diffbot-shaped catalog: uses top-level method field, not call_template", async () => {
-    // This test verifies the fix for PR #8's incomplete implementation.
-    // Diffbot's catalog returns:
-    //   - method: "GET" (top-level field)
-    //   - call_template: "treg call ... --query url=..." (no --method flag)
-    // The old code only parsed call_template and fell back to POST.
-    // The fix prefers the top-level `method` field.
-    const { call } = await import("./treg");
-
-    await call("diffbot.x.extract-article", { url: "https://example.com/article" });
+  test("Diffbot-shaped catalog: uses top-level method field, not call_template", async () => {
+    await call(cfg(), "diffbot.x.extract-article", { url: "https://example.com/article" });
 
     const callRequest = fetchCalls.find((c) => c.url.includes("/call/diffbot.x.extract-article"));
     expect(callRequest).toBeDefined();
-    // Should use GET from the top-level method field, not POST (the default when call_template has no --method)
     expect(callRequest!.options.method).toBe("GET");
-    // Params should be in query string, not body
     expect(callRequest!.url).toContain("url=https");
     expect(callRequest!.options.body).toBeUndefined();
   });
 
-  test.skipIf(!process.env.TREG_TOKEN)("POST endpoint: params sent as JSON body", async () => {
-    const { call } = await import("./treg");
-
-    await call("post-endpoint", { url: "https://example.com", data: { key: "value" } });
+  test("POST endpoint: params sent as JSON body", async () => {
+    await call(cfg(), "post-endpoint", { url: "https://example.com", data: { key: "value" } });
 
     const callRequest = fetchCalls.find((c) => c.url.includes("/call/post-endpoint"));
     expect(callRequest).toBeDefined();
     expect(callRequest!.options.method).toBe("POST");
-    expect(callRequest!.options.body).toBeDefined();
     expect(JSON.parse(callRequest!.options.body as string)).toEqual({
       url: "https://example.com",
       data: { key: "value" },
     });
   });
 
-  test.skipIf(!process.env.TREG_TOKEN)("method override bypasses catalog lookup", async () => {
-    const { call } = await import("./treg");
-
-    await call("some-endpoint", { param: "value" }, { method: "DELETE" });
+  test("method override wins over the catalog's method (the catalog is still read for the price)", async () => {
+    await call(cfg(), "some-endpoint", { param: "value" }, { method: "DELETE" });
 
     const callRequest = fetchCalls.find((c) => c.url.includes("/call/some-endpoint"));
-    expect(callRequest).toBeDefined();
     expect(callRequest!.options.method).toBe("DELETE");
-    const catalogRequest = fetchCalls.find((c) => c.url.includes("/catalog/endpoints/some-endpoint"));
-    expect(catalogRequest).toBeUndefined();
+    expect(fetchCalls.some((c) => c.url.includes("/catalog/endpoints/some-endpoint"))).toBe(true);
   });
 
-  test.skipIf(!process.env.TREG_TOKEN)("empty params work for GET endpoints", async () => {
-    const { call } = await import("./treg");
+  test("empty params work for GET and POST endpoints", async () => {
+    await call(cfg(), "get-endpoint", {});
+    await call(cfg(), "post-endpoint", {});
 
-    await call("get-endpoint", {});
-
-    const callRequest = fetchCalls.find((c) => c.url.includes("/call/get-endpoint"));
-    expect(callRequest).toBeDefined();
-    expect(callRequest!.options.method).toBe("GET");
-    expect(callRequest!.options.body).toBeUndefined();
+    const get = fetchCalls.find((c) => c.url.includes("/call/get-endpoint"));
+    const post = fetchCalls.find((c) => c.url.includes("/call/post-endpoint"));
+    expect(get!.options.method).toBe("GET");
+    expect(get!.options.body).toBeUndefined();
+    expect(post!.options.method).toBe("POST");
+    expect(post!.options.body).toBeUndefined();
   });
 
-  test.skipIf(!process.env.TREG_TOKEN)("empty params work for POST endpoints", async () => {
-    const { call } = await import("./treg");
-
-    await call("post-endpoint", {});
-
-    const callRequest = fetchCalls.find((c) => c.url.includes("/call/post-endpoint"));
-    expect(callRequest).toBeDefined();
-    expect(callRequest!.options.method).toBe("POST");
-    expect(callRequest!.options.body).toBeUndefined();
+  test("sends the config's own token and base URL", async () => {
+    await call(cfg({ token: "ws-secret", baseUrl: "https://other.treg" }), "get-endpoint", {});
+    const callRequest = fetchCalls.find((c) => c.url.includes("/call/get-endpoint"))!;
+    expect(callRequest.url.startsWith("https://other.treg/")).toBe(true);
+    expect((callRequest.options.headers as Record<string, string>)["X-Treg-Token"]).toBe("ws-secret");
   });
 
-  test("call refuses when estimated_usd exceeds cap", async () => {
-    const { call, TREG_MAX_USD_PER_CALL } = await import("./treg");
-    const highCost = TREG_MAX_USD_PER_CALL + 1;
+  test("a config with no token is refused", async () => {
+    await expect(call(cfg({ token: "" }), "get-endpoint", {})).rejects.toThrow(/not configured/i);
+  });
 
-    await expect(call("test-endpoint", {}, { estimatedUsd: highCost })).rejects.toThrow(
+  // ── spend enforcement ──────────────────────────────────────────────────────
+
+  test("call refuses when estimated_usd exceeds the per-call cap (before any network call)", async () => {
+    const c = cfg({ perCallCapUsd: TREG_MAX_USD_PER_CALL });
+    await expect(call(c, "test-endpoint", {}, { estimatedUsd: TREG_MAX_USD_PER_CALL + 1 })).rejects.toThrow(
       /exceeds the cap|TREG_MAX_USD_PER_CALL/i,
     );
+    expect(fetchCalls.length).toBe(0);
   });
 
-  test("backward compat: number arg still works as estimatedUsd", async () => {
-    const { call, TREG_MAX_USD_PER_CALL } = await import("./treg");
-    const highCost = TREG_MAX_USD_PER_CALL + 1;
-
-    await expect(call("test-endpoint", {}, highCost)).rejects.toThrow(/exceeds the cap|TREG_MAX_USD_PER_CALL/i);
+  test("backward compat: a bare number still works as estimatedUsd", async () => {
+    await expect(call(cfg({ perCallCapUsd: 0.01 }), "test-endpoint", {}, 5)).rejects.toThrow(/exceeds the cap/i);
   });
 
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
+  test("the catalog price beats a low or omitted estimate", async () => {
+    endpoints["pricey"] = { price: 0.5 };
+    const c = cfg({ perCallCapUsd: 0.01 });
+
+    // Agent understates the cost...
+    await expect(call(c, "pricey", {}, { estimatedUsd: 0.0001 })).rejects.toThrow(/exceeds the cap/i);
+    // ...or omits it entirely (previously this skipped the cap altogether).
+    await expect(call(c, "pricey", {})).rejects.toThrow(/exceeds the cap/i);
+    expect(fetchCalls.some((x) => x.url.includes("/call/pricey"))).toBe(false);
+  });
+
+  test("daily cap: refuses once today's spend plus the call would exceed it", async () => {
+    endpoints["cheap"] = { price: 0.002 };
+    const c = cfg({ perCallCapUsd: 0.01, dailyCapUsd: 0.003 });
+
+    await call(c, "cheap", {});
+    expect(spentToday(c.ledgerKey)).toBeCloseTo(0.002, 6);
+    await expect(call(c, "cheap", {})).rejects.toThrow(/daily cap/i);
+    expect(spentToday(c.ledgerKey)).toBeCloseTo(0.002, 6);
+  });
+
+  test("a failed call is not charged (the reservation is given back)", async () => {
+    endpoints["flaky"] = { price: 0.004, callStatus: 500, callBody: { error: "boom" } };
+    const c = cfg({ perCallCapUsd: 0.01 });
+
+    await expect(call(c, "flaky", {})).rejects.toThrow(/boom/);
+    expect(spentToday(c.ledgerKey)).toBe(0);
+  });
+
+  test("the ledger settles to the charge Treg reports", async () => {
+    endpoints["metered"] = { price: 0.004, callBody: { data: "x", cost_usd: 0.0005, call_id: "c-1" } };
+    const c = cfg({ perCallCapUsd: 0.01 });
+
+    const res = await call(c, "metered", {});
+    expect(res.cost_usd).toBeCloseTo(0.0005, 6);
+    expect(res.call_id).toBe("c-1");
+    expect(spentToday(c.ledgerKey)).toBeCloseTo(0.0005, 6);
+  });
+
+  test("spend is tracked per workspace, not shared", async () => {
+    endpoints["cheap"] = { price: 0.002 };
+    const a = cfg({ perCallCapUsd: 0.01, dailyCapUsd: 0.003 });
+    const b = cfg({ perCallCapUsd: 0.01, dailyCapUsd: 0.003 });
+
+    await call(a, "cheap", {});
+    await call(b, "cheap", {}); // b's budget is untouched by a's spend
+    expect(spentToday(a.ledgerKey)).toBeCloseTo(0.002, 6);
+    expect(spentToday(b.ledgerKey)).toBeCloseTo(0.002, 6);
+  });
+
+  test("an unreadable catalog price refuses the call unless estimate AND method are given", async () => {
+    globalThis.fetch = mock(async () => new Response("down", { status: 503 })) as typeof globalThis.fetch;
+    await expect(call(cfg(), "x", {})).rejects.toThrow(/could not read the catalog price/i);
+    await expect(call(cfg(), "x", {}, { estimatedUsd: 0.001 })).rejects.toThrow(/could not read the catalog price/i);
   });
 });

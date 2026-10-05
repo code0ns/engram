@@ -3,7 +3,7 @@ import { githubToken } from "@/lib/github";
 import { rebuildIndex } from "@/lib/vault/store";
 import { getSession, isAllowed } from "@/lib/auth";
 import { addGrant } from "@/lib/access";
-import { dashboardAuthEnforced, grantedWorkspacesFor, resolveDashboardWorkspace } from "@/lib/workspace-resolve";
+import { dashboardAuthEnforced, grantedWorkspacesFor, requireAdmin, resolveDashboardWorkspace } from "@/lib/workspace-resolve";
 import { vaultDirFor } from "@/lib/repos";
 
 export const dynamic = "force-dynamic";
@@ -26,6 +26,8 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
+  const admin = await requireAdmin(req);
+  if (admin instanceof Response) return admin;
   const b = await req.json().catch(() => ({}));
   const url = b.cloneUrl || b.url || (b.fullName ? `https://github.com/${b.fullName}.git` : "");
   if (!url) return Response.json({ error: "repo url or fullName required" }, { status: 400 });

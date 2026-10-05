@@ -6,6 +6,7 @@ import { withActor } from "@/lib/actor";
 import { VERSION } from "@/lib/version";
 import { getTool, visibleTools } from "@/lib/mcp/tools";
 import { callTool } from "@/lib/mcp/call";
+import { resolveTregConfig, tregEnabled } from "@/lib/treg";
 import {
   resolveTokenWorkspace,
   tokenHasWorkspaceAccess,
@@ -88,7 +89,10 @@ async function handleMessage(
     case "ping":
       return rpc(id, {});
     case "tools/list": {
-      const tools = visibleTools(caller.scope === "write", harnessEnabled());
+      // Treg tools show only when this caller's workspace has a Treg token (own or shared).
+      const listWs = resolveEffectiveWorkspace(caller);
+      const tregOn = listWs ? tregEnabled(resolveTregConfig(listWs.workspaceId)) : false;
+      const tools = visibleTools(caller.scope === "write", harnessEnabled(), tregOn);
       // Include workspace tools - they're always visible (read-scope sees list, write-scope sees both)
       const wkTools = WORKSPACE_TOOLS.filter((t) => !t.write || caller.scope === "write");
       const allTools = [...tools, ...wkTools];
@@ -170,7 +174,7 @@ async function handleMessage(
         // this call causes with the caller's name, for the git audit trail. callTool validates
         // `arguments` against the tool's inputSchema first — a malformed call must surface as an
         // error, never as a successful no-op write.
-        const out = await callTool(tool.name, params?.arguments ?? {}, { dir: ws.dir });
+        const out = await callTool(tool.name, params?.arguments ?? {}, { dir: ws.dir, workspaceId: ws.workspaceId });
         const text = typeof out === "string" ? out : JSON.stringify(out, null, 2);
         return rpc(id, { content: [{ type: "text", text }] });
       } catch (e) {

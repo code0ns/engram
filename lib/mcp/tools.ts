@@ -24,7 +24,6 @@ import {
 } from "@/lib/vault/write";
 import { hasRead, recordRead } from "./session";
 import { TREG_TOOLS, TREG_TOOL_MAP } from "./treg-tools";
-import { tregEnabled } from "@/lib/treg";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Args = Record<string, any>;
@@ -33,6 +32,9 @@ type Args = Record<string, any>;
  *  handler instead of the vault layer resolving its own "current" vault implicitly. */
 export interface ToolCtx {
   dir: string;
+  /** The workspace id the call resolved to; null/absent for callers with none (stdio, legacy
+   *  sample vault). Per-workspace config such as Treg credentials and spend caps keys off this. */
+  workspaceId?: string | null;
 }
 
 export interface Tool {
@@ -387,10 +389,10 @@ export function getTool(name: string): Tool | undefined {
  * tests can pin, rather than as a filter expression inline in a request handler.
  *
  * The auto-filing harness stays hidden unless it's turned on — agents file notes themselves.
- * Treg tools are hidden when TREG_TOKEN is not configured — matching how brain_capture is hidden.
+ * Treg tools are hidden unless the caller's workspace has a Treg token (its own or the shared env
+ * one) — `tregOn` is that per-workspace answer — matching how brain_capture is hidden.
  */
-export function visibleTools(canWrite: boolean, harnessOn: boolean): Tool[] {
-  const tregOn = tregEnabled();
+export function visibleTools(canWrite: boolean, harnessOn: boolean, tregOn = false): Tool[] {
   const brainTools = TOOLS.filter((t) => {
     if (t.name === "brain_capture" && !harnessOn) return false;
     if (t.write && !canWrite) return false;

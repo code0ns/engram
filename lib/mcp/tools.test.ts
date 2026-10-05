@@ -63,6 +63,14 @@ describe("visibleTools", () => {
     expect(visibleTools(true, true).map((t) => t.name)).toContain("brain_capture");
   });
 
+  test("Treg tools appear only when the caller's workspace has Treg (and write tools only for write tokens)", () => {
+    expect(visibleTools(true, true).map((t) => t.name)).not.toContain("tool_search");
+    const readNames = visibleTools(false, true, true).map((t) => t.name);
+    expect(readNames).toContain("tool_search");
+    expect(readNames).not.toContain("tool_call");
+    expect(visibleTools(true, true, true).map((t) => t.name)).toContain("tool_call");
+  });
+
   test("read-only visibility is a strict subset of write visibility", () => {
     const write = new Set(visibleTools(true, true).map((t) => t.name));
     const read = visibleTools(false, true).map((t) => t.name);

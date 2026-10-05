@@ -1,6 +1,6 @@
 import { AUTH_DISABLED, AUTH_SECRET, VAULT_DIR } from "@/lib/config";
 import { getSession, isAllowed } from "@/lib/auth";
-import { grantsForEmail } from "@/lib/access";
+import { grantsForEmail, isAdmin } from "@/lib/access";
 import { listRepos, getActive, vaultDirFor, type Repo } from "@/lib/repos";
 
 /**
@@ -31,6 +31,27 @@ function defaultWorkspace(): ResolvedWorkspace {
  *  at all, not just resolve a single current workspace. */
 export function dashboardAuthEnforced(): boolean {
   return !AUTH_DISABLED && AUTH_SECRET !== "";
+}
+
+/**
+ * Gate for dashboard routes that change who can see what, or that hold money/secrets
+ * (grants, workspace add/rename/delete, git + Treg tokens, spend caps). Returns the caller, or
+ * a Response the route should return as-is. Local/no-auth mode has a single user — the owner.
+ */
+export async function requireAdmin(req: Request): Promise<{ email: string } | Response> {
+  if (!dashboardAuthEnforced()) return { email: "local" };
+  const session = await getSession(req);
+  if (!session || !isAllowed(session.email)) return Response.json({ error: "unauthorized" }, { status: 401 });
+  if (!isAdmin(session.email)) return Response.json({ error: "admin only" }, { status: 403 });
+  return { email: session.email };
+}
+
+/** True in local/no-auth mode; otherwise only when this session is granted workspace `id`. */
+export async function canAccessWorkspace(req: Request, id: string): Promise<boolean> {
+  if (!dashboardAuthEnforced()) return true;
+  const session = await getSession(req);
+  if (!session || !isAllowed(session.email)) return false;
+  return grantedWorkspacesFor(session.email).some((r) => r.id === id);
 }
 
 function repoToResolved(r: Repo): ResolvedWorkspace {

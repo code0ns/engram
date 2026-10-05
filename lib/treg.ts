@@ -2,47 +2,38 @@
  * Treg API gateway — lets Engram-only clients discover and call external APIs
  * through Treg's catalog without needing a separate Treg MCP connector.
  *
- * Config via env:
- *   TREG_TOKEN        — API token (required to enable Treg tools)
- *   TREG_BASE_URL     — API base URL (default: https://treg.to)
- *   TREG_ORG_ID       — Org ID or team slug for balance endpoint (e.g. "12345" or "harold-builds")
+ * Every function takes an explicit TregConfig (lib/treg-config.ts): the workspace's own token,
+ * org and spend limits, falling back to the env values:
+ *   TREG_TOKEN            — API token (Treg tools are hidden for a workspace with no token at all)
+ *   TREG_BASE_URL         — API base URL (default: https://treg.to)
+ *   TREG_ORG_ID           — Org ID or team slug for the balance endpoint (e.g. "12345" or "harold-builds")
  *   TREG_MAX_USD_PER_CALL — Maximum cost per tool_call (default: 0.01)
- *
- * When TREG_TOKEN is unset, Treg tools are hidden from the MCP surface entirely.
+ *   TREG_MAX_USD_PER_DAY  — Maximum spend per workspace per UTC day (default: 1.00)
  *
  * HTTP method selection:
- *   Treg endpoints can be GET or POST (or other methods). The catalog's `call_template`
- *   field indicates the method (e.g., `--method GET`). We parse this and use the correct
- *   method when calling endpoints:
- *   - GET endpoints: params go in the query string
+ *   Treg endpoints can be GET or POST (or other methods). The catalog's top-level `method` field
+ *   wins, then the `call_template` (`--method GET`), then POST:
+ *   - GET/DELETE endpoints: params go in the query string
  *   - POST/PUT/PATCH endpoints: params go in the request body as JSON
  */
 
-/** Treg API base URL. */
-export const TREG_BASE_URL = process.env.TREG_BASE_URL?.replace(/\/$/, "") || "https://treg.to";
+import {
+  GLOBAL_LEDGER_KEY,
+  TREG_BASE_URL,
+  TREG_MAX_USD_PER_CALL,
+  TREG_MAX_USD_PER_DAY,
+  recordSpend,
+  resolveTregConfig,
+  spentToday,
+  type TregConfig,
+} from "./treg-config";
 
-/** Treg API token — NOT exposed to MCP responses, only used server-side. */
-const TREG_TOKEN = process.env.TREG_TOKEN ?? "";
+export { GLOBAL_LEDGER_KEY, TREG_BASE_URL, TREG_MAX_USD_PER_CALL, TREG_MAX_USD_PER_DAY, resolveTregConfig, spentToday };
+export type { TregConfig };
 
-/** Treg org ID or team slug — optional; per-org tokens bake this in, but required for balance if not. */
-const TREG_ORG_ID = process.env.TREG_ORG_ID ?? "";
-
-/** Maximum USD per call — calls above this fail with a clear error. */
-export const TREG_MAX_USD_PER_CALL = (() => {
-  const v = process.env.TREG_MAX_USD_PER_CALL;
-  if (!v) return 0.01;
-  const n = parseFloat(v);
-  return Number.isFinite(n) && n > 0 ? n : 0.01;
-})();
-
-/** True when Treg tools should be exposed. */
-export function tregEnabled(): boolean {
-  return TREG_TOKEN !== "";
-}
-
-/** Get the token for internal use only — never expose this to MCP responses. */
-export function getTregToken(): string {
-  return TREG_TOKEN;
+/** True when Treg tools should be exposed for this config (a token exists, own or inherited). */
+export function tregEnabled(cfg: TregConfig): boolean {
+  return cfg.token !== "";
 }
 
 // ── HTTP Method Handling ───────────────────────────────────────────────────────
@@ -78,43 +69,61 @@ export function extractMethodFromTemplate(callTemplate: string | undefined): Htt
   return normalizeHttpMethod(match[1]);
 }
 
-/**
- * In-process cache for endpoint HTTP methods. Avoids repeated catalog lookups
- * for the same endpoint during a session. Key = endpoint_id, value = method.
- */
-const endpointMethodCache = new Map<string, HttpMethod>();
+interface EndpointInfo {
+  method: HttpMethod;
+  /** Catalog price in USD, when the catalog states one. */
+  priceUsd?: number;
+  at: number;
+}
+
+/** Prices change; a method never does. Re-read the catalog at most this often per endpoint. */
+const ENDPOINT_INFO_TTL_MS = 10 * 60_000;
+
+/** In-process cache keyed by base URL + endpoint id. Avoids a catalog round trip per call. */
+const endpointInfoCache = new Map<string, EndpointInfo>();
+
+/** The price a catalog entry states, in USD, or undefined when it states none. */
+export function catalogPriceUsd(info: Pick<TregCatalogGetResult, "cost" | "usd_per_call">): number | undefined {
+  const p = info.cost?.usd ?? info.usd_per_call;
+  return typeof p === "number" && Number.isFinite(p) && p >= 0 ? p : undefined;
+}
 
 /**
- * Get the HTTP method for an endpoint. Uses cache, falls back to catalog lookup.
- *
- * Method resolution order:
+ * Method + catalog price for an endpoint (cached). Method resolution order:
  * 1. Catalog's top-level `method` field (e.g., `method: "GET"`)
  * 2. Parsed from `call_template` (e.g., `--method GET`)
- * 3. Default to "POST" for backward compatibility
+ * 3. Default to "POST"
  *
- * This fixes endpoints like Diffbot where the catalog returns `method: "GET"`
- * but the `call_template` uses `--query` instead of `--method GET`.
+ * Throws when the catalog can't be reached, so a caller that needs the price (call()) can
+ * refuse rather than spend blind.
  */
-export async function getEndpointMethod(endpointId: string): Promise<HttpMethod> {
-  const cached = endpointMethodCache.get(endpointId);
-  if (cached) return cached;
+async function getEndpointInfo(cfg: TregConfig, endpointId: string): Promise<EndpointInfo> {
+  const key = `${cfg.baseUrl}|${endpointId}`;
+  const cached = endpointInfoCache.get(key);
+  if (cached && Date.now() - cached.at < ENDPOINT_INFO_TTL_MS) return cached;
 
+  const info = await catalogGet(cfg, endpointId);
+  const entry: EndpointInfo = {
+    method: normalizeHttpMethod(info.method) ?? extractMethodFromTemplate(info.call_template) ?? "POST",
+    priceUsd: catalogPriceUsd(info),
+    at: Date.now(),
+  };
+  endpointInfoCache.set(key, entry);
+  return entry;
+}
+
+/** Get the HTTP method for an endpoint (cached); POST if the catalog can't be read. */
+export async function getEndpointMethod(cfg: TregConfig, endpointId: string): Promise<HttpMethod> {
   try {
-    const info = await catalogGet(endpointId);
-    const method =
-      normalizeHttpMethod(info.method) ??
-      extractMethodFromTemplate(info.call_template) ??
-      "POST";
-    endpointMethodCache.set(endpointId, method);
-    return method;
+    return (await getEndpointInfo(cfg, endpointId)).method;
   } catch {
     return "POST";
   }
 }
 
-/** Clear the endpoint method cache (useful for testing). */
+/** Clear the endpoint cache (useful for testing). */
 export function clearEndpointMethodCache(): void {
-  endpointMethodCache.clear();
+  endpointInfoCache.clear();
 }
 
 // ── HTTP Client ────────────────────────────────────────────────────────────────
@@ -157,33 +166,34 @@ export function extractOrgId(org: TregOrgRaw): number | undefined {
   return typeof id === "number" ? id : undefined;
 }
 
-/** In-process cache for resolved org ID (slug → numeric). */
-let resolvedOrgIdCache: { slug: string; numericId: number } | null = null;
+/** In-process cache for resolved org IDs (slug -> numeric), keyed per credential. */
+const resolvedOrgIdCache = new Map<string, number>();
 
 /**
- * Resolve TREG_ORG_ID to a numeric ID.
+ * Resolve the config's org to a numeric ID.
  * - If already numeric, returns it as-is.
  * - If a slug, fetches GET /orgs and finds the matching org by slug (or name as fallback).
- * - Caches the result in-process for the server lifetime.
+ * - Caches the result in-process, per credential (two workspaces can use the same slug on
+ *   different tokens).
  */
-export async function resolveOrgId(): Promise<number> {
-  if (!TREG_ORG_ID) {
+export async function resolveOrgId(cfg: TregConfig): Promise<number> {
+  if (!cfg.orgId) {
     throw new Error(
-      "Treg balance requires TREG_ORG_ID to be set. " +
-        "Per-org API tokens bake the org in, but TREG_ORG_ID is still needed for this endpoint.",
+      "Treg balance requires an org to be set for this workspace (Access > Workspaces > Settings, or TREG_ORG_ID). " +
+        "Per-org API tokens bake the org in, but the org is still needed for this endpoint.",
     );
   }
 
-  if (isNumericOrgId(TREG_ORG_ID)) {
-    return parseInt(TREG_ORG_ID, 10);
+  if (isNumericOrgId(cfg.orgId)) {
+    return parseInt(cfg.orgId, 10);
   }
 
-  if (resolvedOrgIdCache && resolvedOrgIdCache.slug === TREG_ORG_ID) {
-    return resolvedOrgIdCache.numericId;
-  }
+  const cacheKey = `${cfg.baseUrl}\n${cfg.token}\n${cfg.orgId}`;
+  const cached = resolvedOrgIdCache.get(cacheKey);
+  if (cached !== undefined) return cached;
 
-  const orgs = await fetchOrgs();
-  const slug = TREG_ORG_ID.toLowerCase();
+  const orgs = await fetchOrgs(cfg);
+  const slug = cfg.orgId.toLowerCase();
   const match = orgs.find(
     (o) => o.slug?.toLowerCase() === slug || o.name?.toLowerCase() === slug,
   );
@@ -191,51 +201,43 @@ export async function resolveOrgId(): Promise<number> {
   if (!match) {
     const available = orgs.map((o) => o.slug || o.name || extractOrgId(o) || "(unknown)").join(", ");
     throw new Error(
-      `Treg org slug "${TREG_ORG_ID}" not found. Available orgs: ${available || "(none)"}`,
+      `Treg org slug "${cfg.orgId}" not found. Available orgs: ${available || "(none)"}`,
     );
   }
 
   const numericId = extractOrgId(match);
   if (numericId === undefined) {
     throw new Error(
-      `Treg org "${TREG_ORG_ID}" matched but has no numeric ID. ` +
+      `Treg org "${cfg.orgId}" matched but has no numeric ID. ` +
         `Org data: ${JSON.stringify(match)}. ` +
         `Expected field "org_id" or "id" with an integer value.`,
     );
   }
 
-  resolvedOrgIdCache = { slug: TREG_ORG_ID, numericId };
+  resolvedOrgIdCache.set(cacheKey, numericId);
   return numericId;
 }
 
-/** Fetch the list of orgs accessible to the current token. */
-async function fetchOrgs(): Promise<TregOrgRaw[]> {
-  if (!tregEnabled()) {
-    throw new Error("Treg is not configured — set TREG_TOKEN to enable.");
+/** Fetch the list of orgs accessible to the config's token. */
+async function fetchOrgs(cfg: TregConfig): Promise<TregOrgRaw[]> {
+  if (!tregEnabled(cfg)) {
+    throw new Error("Treg is not configured for this workspace — set a Treg token (Access > Workspaces > Settings) or TREG_TOKEN.");
   }
 
-  const url = `${TREG_BASE_URL}/orgs`;
+  const url = `${cfg.baseUrl}/orgs`;
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    "X-Treg-Token": TREG_TOKEN,
+    "X-Treg-Token": cfg.token,
   };
 
-  if (TREG_ORG_ID && !isNumericOrgId(TREG_ORG_ID)) {
-    headers["X-Treg-Org"] = TREG_ORG_ID;
+  if (cfg.orgId && !isNumericOrgId(cfg.orgId)) {
+    headers["X-Treg-Org"] = cfg.orgId;
   }
 
   const res = await fetch(url, { method: "GET", headers });
 
   if (!res.ok) {
-    let msg = `Treg API error: ${res.status} ${res.statusText}`;
-    try {
-      const err = (await res.json()) as TregError;
-      if (err.error) msg = `Treg API: ${stringifyErrorField(err.error)}`;
-      else if (err.detail) msg = `Treg API: ${stringifyErrorField(err.detail)}`;
-    } catch {
-      // ignore parse errors
-    }
-    throw new Error(msg);
+    throw new Error(await errorMessage(res));
   }
 
   return res.json() as Promise<TregOrgRaw[]>;
@@ -243,7 +245,19 @@ async function fetchOrgs(): Promise<TregOrgRaw[]> {
 
 /** Clear the org ID cache (for testing). */
 export function clearOrgIdCache(): void {
-  resolvedOrgIdCache = null;
+  resolvedOrgIdCache.clear();
+}
+
+async function errorMessage(res: Response): Promise<string> {
+  let msg = `Treg API error: ${res.status} ${res.statusText}`;
+  try {
+    const err = (await res.json()) as TregError;
+    if (err.error) msg = `Treg API: ${stringifyErrorField(err.error)}`;
+    else if (err.detail) msg = `Treg API: ${stringifyErrorField(err.detail)}`;
+  } catch {
+    // ignore parse errors
+  }
+  return msg;
 }
 
 export interface TregCatalogEndpointCost {
@@ -305,7 +319,7 @@ export interface TregCatalogGetResult {
 export interface TregCallResult {
   data?: unknown;
   call_id?: string;
-  cost_micro?: number;
+  /** What this call cost: the amount Treg reported, else the catalog price we reserved. */
   cost_usd?: number;
   error?: string;
 }
@@ -323,14 +337,14 @@ interface TregFetchOptions {
   query?: Record<string, string | number | boolean | undefined>;
 }
 
-async function tregFetch<T>(endpoint: string, options: TregFetchOptions = {}): Promise<T> {
-  if (!tregEnabled()) {
-    throw new Error("Treg is not configured — set TREG_TOKEN to enable.");
+async function tregFetch<T>(cfg: TregConfig, endpoint: string, options: TregFetchOptions = {}): Promise<T> {
+  if (!tregEnabled(cfg)) {
+    throw new Error("Treg is not configured for this workspace — set a Treg token (Access > Workspaces > Settings) or TREG_TOKEN.");
   }
 
   const { method = "GET", body, query } = options;
 
-  let url = `${TREG_BASE_URL}${endpoint}`;
+  let url = `${cfg.baseUrl}${endpoint}`;
   if (query) {
     const params = new URLSearchParams();
     for (const [k, v] of Object.entries(query)) {
@@ -344,21 +358,13 @@ async function tregFetch<T>(endpoint: string, options: TregFetchOptions = {}): P
     method,
     headers: {
       "Content-Type": "application/json",
-      "X-Treg-Token": TREG_TOKEN,
+      "X-Treg-Token": cfg.token,
     },
     body: body ? JSON.stringify(body) : undefined,
   });
 
   if (!res.ok) {
-    let msg = `Treg API error: ${res.status} ${res.statusText}`;
-    try {
-      const err = (await res.json()) as TregError;
-      if (err.error) msg = `Treg API: ${stringifyErrorField(err.error)}`;
-      else if (err.detail) msg = `Treg API: ${stringifyErrorField(err.detail)}`;
-    } catch {
-      // ignore parse errors
-    }
-    throw new Error(msg);
+    throw new Error(await errorMessage(res));
   }
 
   return res.json() as Promise<T>;
@@ -368,8 +374,8 @@ async function tregFetch<T>(endpoint: string, options: TregFetchOptions = {}): P
  * Search the Treg catalog for endpoints matching a task description.
  * Safe for read-scope tokens — no cost, no side effects.
  */
-export async function catalogSearch(query: string, limit?: number): Promise<TregCatalogSearchResult> {
-  return tregFetch<TregCatalogSearchResult>("/catalog/search", {
+export async function catalogSearch(cfg: TregConfig, query: string, limit?: number): Promise<TregCatalogSearchResult> {
+  return tregFetch<TregCatalogSearchResult>(cfg, "/catalog/search", {
     query: { q: query, limit: limit ?? 10 },
   });
 }
@@ -378,8 +384,8 @@ export async function catalogSearch(query: string, limit?: number): Promise<Treg
  * Get full details for a specific endpoint (parameters, exact price).
  * Safe for read-scope tokens — no cost, no side effects.
  */
-export async function catalogGet(endpointId: string): Promise<TregCatalogGetResult> {
-  return tregFetch<TregCatalogGetResult>(`/catalog/endpoints/${encodeURIComponent(endpointId)}`);
+export async function catalogGet(cfg: TregConfig, endpointId: string): Promise<TregCatalogGetResult> {
+  return tregFetch<TregCatalogGetResult>(cfg, `/catalog/endpoints/${encodeURIComponent(endpointId)}`);
 }
 
 /**
@@ -388,13 +394,28 @@ export async function catalogGet(endpointId: string): Promise<TregCatalogGetResu
 export interface TregCallOptions {
   /** Explicit HTTP method override. If not provided, looks up from catalog. */
   method?: HttpMethod;
-  /** Expected cost from tool_get — used to enforce the spending cap. */
+  /** Expected cost from tool_get. Advisory only: the catalog price is authoritative. */
   estimatedUsd?: number;
+}
+
+/** Pull the charged amount / call id out of whatever shape Treg answered with. */
+function readCharge(res: unknown): { chargedUsd?: number; callId?: string } {
+  if (typeof res !== "object" || res === null) return {};
+  const r = res as Record<string, unknown>;
+  const cost = r.cost as { usd?: unknown } | undefined;
+  const candidates = [r.cost_usd, r.usd_charged, cost?.usd];
+  const chargedUsd = candidates.find((c): c is number => typeof c === "number" && Number.isFinite(c) && c >= 0);
+  return { chargedUsd, callId: typeof r.call_id === "string" ? r.call_id : undefined };
 }
 
 /**
  * Call an endpoint through Treg. COSTS MONEY — write-scope only.
- * Refuses if the endpoint's cost exceeds TREG_MAX_USD_PER_CALL.
+ *
+ * Spend is enforced here, not trusted from the caller. The price used is the larger of the
+ * agent-supplied `estimatedUsd` and the catalog's own price (an agent can omit or understate the
+ * estimate; it cannot change the catalog). The call is refused when that price exceeds the
+ * per-call cap, or when today's spend plus this call would exceed the daily cap. The price is
+ * reserved against the daily ledger before the request and settled to the real charge after.
  *
  * HTTP method selection:
  * - If `options.method` is provided, uses that
@@ -403,6 +424,7 @@ export interface TregCallOptions {
  * - POST/PUT/PATCH: params are passed as JSON body
  */
 export async function call(
+  cfg: TregConfig,
   endpointId: string,
   params: Record<string, unknown>,
   estimatedUsdOrOptions?: number | TregCallOptions,
@@ -414,43 +436,87 @@ export async function call(
 
   const { estimatedUsd } = options;
 
-  if (estimatedUsd !== undefined && estimatedUsd > TREG_MAX_USD_PER_CALL) {
+  // An estimate above the cap is refused before any network round trip.
+  if (estimatedUsd !== undefined && estimatedUsd > cfg.perCallCapUsd) {
+    throw perCallCapError(estimatedUsd, cfg.perCallCapUsd);
+  }
+
+  let info: EndpointInfo | undefined;
+  try {
+    info = await getEndpointInfo(cfg, endpointId);
+  } catch (e) {
+    // Without the catalog we know the method only if the caller gave it, and never the price.
+    if (!tregEnabled(cfg)) throw e;
+    if (estimatedUsd === undefined || !options.method) {
+      throw new Error(
+        `Refusing tool_call: could not read the catalog price for "${endpointId}" (${(e as Error).message}). ` +
+          `Retry, or pass both estimated_usd and method.`,
+      );
+    }
+  }
+
+  const price = Math.max(estimatedUsd ?? 0, info?.priceUsd ?? 0);
+  if (price > cfg.perCallCapUsd) throw perCallCapError(price, cfg.perCallCapUsd);
+
+  const spent = spentToday(cfg.ledgerKey);
+  if (spent + price > cfg.dailyCapUsd) {
     throw new Error(
-      `Refusing tool_call: estimated cost $${estimatedUsd.toFixed(4)} exceeds the cap of $${TREG_MAX_USD_PER_CALL.toFixed(4)}. ` +
-        `Ask the operator to raise TREG_MAX_USD_PER_CALL or get human approval for expensive calls.`,
+      `Refusing tool_call: today's spend $${spent.toFixed(4)} plus this call $${price.toFixed(4)} would exceed ` +
+        `the daily cap of $${cfg.dailyCapUsd.toFixed(4)} for this workspace. ` +
+        `Ask a workspace admin to raise the daily cap (Access > Workspaces > Settings), or try again tomorrow (UTC).`,
     );
   }
 
-  const method = options.method ?? (await getEndpointMethod(endpointId));
+  const method = options.method ?? info?.method ?? "POST";
   const hasParams = Object.keys(params).length > 0;
   const useBody = BODY_METHODS.includes(method);
 
-  const res = await tregFetch<unknown>(`/call/${encodeURIComponent(endpointId)}`, {
-    method,
-    body: useBody && hasParams ? params : undefined,
-    query: !useBody && hasParams ? (params as Record<string, string | number | boolean | undefined>) : undefined,
-  });
+  recordSpend(cfg.ledgerKey, price); // reserve
+  let res: unknown;
+  try {
+    res = await tregFetch<unknown>(cfg, `/call/${encodeURIComponent(endpointId)}`, {
+      method,
+      body: useBody && hasParams ? params : undefined,
+      query: !useBody && hasParams ? (params as Record<string, string | number | boolean | undefined>) : undefined,
+    });
+  } catch (e) {
+    recordSpend(cfg.ledgerKey, -price); // a failed call isn't charged
+    throw e;
+  }
 
-  return { data: res };
+  const { chargedUsd, callId } = readCharge(res);
+  const charged = chargedUsd ?? price;
+  recordSpend(cfg.ledgerKey, charged - price); // settle to the real charge
+
+  return { data: res, call_id: callId, cost_usd: charged };
+}
+
+function perCallCapError(usd: number, cap: number): Error {
+  return new Error(
+    `Refusing tool_call: estimated cost $${usd.toFixed(4)} exceeds the cap of $${cap.toFixed(4)} per call. ` +
+      `Ask a workspace admin to raise the per-call cap (Access > Workspaces > Settings, or TREG_MAX_USD_PER_CALL) ` +
+      `or get human approval for expensive calls.`,
+  );
 }
 
 /**
  * Get the current Treg balance. WRITE-SCOPE — reveals spending info.
- * Requires TREG_ORG_ID to be set if using an identity token (per-org tokens bake this in).
- * TREG_ORG_ID can be either a numeric org ID or a team slug (e.g. "harold-builds").
+ * Needs an org on the config when using an identity token (per-org tokens bake it in).
+ * The org can be a numeric org ID or a team slug (e.g. "harold-builds").
  */
-export async function balance(): Promise<TregBalanceResult> {
-  const numericOrgId = await resolveOrgId();
-  return tregFetch<TregBalanceResult>(`/orgs/${numericOrgId}/balance`);
+export async function balance(cfg: TregConfig): Promise<TregBalanceResult> {
+  const numericOrgId = await resolveOrgId(cfg);
+  return tregFetch<TregBalanceResult>(cfg, `/orgs/${numericOrgId}/balance`);
 }
 
 // ── Logging for ops ────────────────────────────────────────────────────────────
 
 export function logTregCall(
   action: "search" | "get" | "call" | "balance",
-  details: { endpointId?: string; usdEstimate?: number; success: boolean; error?: string },
+  details: { endpointId?: string; usdEstimate?: number; success: boolean; error?: string; workspace?: string },
 ): void {
   const parts = [`[treg] ${action}`];
+  if (details.workspace) parts.push(`ws=${details.workspace}`);
   if (details.endpointId) parts.push(`endpoint=${details.endpointId}`);
   if (details.usdEstimate !== undefined) parts.push(`usd=${details.usdEstimate.toFixed(4)}`);
   parts.push(details.success ? "ok" : `fail: ${details.error ?? "unknown"}`);

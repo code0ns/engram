@@ -29,3 +29,6 @@ process.env.VAULT_DIR = TEST_VAULT;
 process.env.ENGRAM_DATA_DIR = TEST_DATA;
 // Never let a test commit or push. The vault under test is not a git repo anyway, but be explicit.
 process.env.GIT_SYNC_ENABLED = "false";
+// A fixed allowlist for the access-control tests (config.ts reads it at import time too). The first
+// address is the bootstrap owner/admin.
+process.env.ALLOWED_EMAILS = "owner@test.dev,colleague@test.dev,other@test.dev";
