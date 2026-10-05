@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, createContext, useContext, useMemo, useCallback } from "react";
+import { useState, createContext, useContext, useMemo, useCallback, type KeyboardEvent } from "react";
 import { useRouter } from "next/navigation";
 import useSWR, { useSWRConfig } from "swr";
 import { Check, ChevronRight, FileText, Palette, Pencil, Pipette, Trash2, X, GripVertical } from "lucide-react";
@@ -51,6 +51,21 @@ export function dirOf(p: string): string {
 
 export function join(dir: string, name: string): string {
   return dir ? `${dir}/${name}` : name;
+}
+
+/**
+ * Enter/Space activation for a `div role="button"` row. Rows are divs (not buttons) because
+ * they contain the drag handle and rename input, which can't nest inside a <button>. Keys
+ * from those nested controls are ignored so typing a rename doesn't also open the row.
+ */
+function onRowKeyDown(activate: () => void) {
+  return (e: KeyboardEvent<HTMLElement>) => {
+    if (e.target !== e.currentTarget) return;
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      activate();
+    }
+  };
 }
 
 export function useVaultMutations() {
@@ -540,9 +555,7 @@ function SortableDir({
             role="button"
             tabIndex={0}
             onClick={() => router.push(`/f/${node.path}`)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") router.push(`/f/${node.path}`);
-            }}
+            onKeyDown={onRowKeyDown(() => router.push(`/f/${node.path}`))}
             className={cn(
               "group flex w-full cursor-pointer items-center gap-1 rounded-md py-1 pr-2 text-left text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
               isDropTarget && "bg-primary/20 ring-2 ring-primary ring-inset",
@@ -688,10 +701,13 @@ function DraggableFile({ node, depth }: { node: TreeNode; depth: number }) {
     <li ref={setNodeRef} style={style}>
       <ContextMenu>
         <ContextMenuTrigger asChild>
-          <button
+          <div
+            role="button"
+            tabIndex={0}
             onClick={() => !renaming && router.push(`/n/${node.path}`)}
+            onKeyDown={onRowKeyDown(() => !renaming && router.push(`/n/${node.path}`))}
             className={cn(
-              "group flex w-full items-center gap-1.5 truncate rounded-md py-1 pr-2 text-left transition-colors",
+              "group flex w-full cursor-pointer items-center gap-1.5 truncate rounded-md py-1 pr-2 text-left transition-colors",
               active ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
             )}
             style={{ paddingLeft: depth * 12 + 8 }}
@@ -712,7 +728,7 @@ function DraggableFile({ node, depth }: { node: TreeNode; depth: number }) {
             ) : (
               <span className="truncate">{node.title || node.name}</span>
             )}
-          </button>
+          </div>
         </ContextMenuTrigger>
         <ContextMenuContent>
           <ContextMenuItem onSelect={() => setRenaming(true)}>
