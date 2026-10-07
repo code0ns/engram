@@ -64,11 +64,27 @@ describe("visibleTools", () => {
   });
 
   test("Treg tools appear only when the caller's workspace has Treg (and write tools only for write tokens)", () => {
-    expect(visibleTools(true, true).map((t) => t.name)).not.toContain("tool_search");
+    const noTreg = visibleTools(true, true).map((t) => t.name);
+    for (const n of ["tool_get", "tool_call", "tool_balance"]) expect(noTreg).not.toContain(n);
     const readNames = visibleTools(false, true, true).map((t) => t.name);
-    expect(readNames).toContain("tool_search");
+    expect(readNames).toContain("tool_get");
     expect(readNames).not.toContain("tool_call");
     expect(visibleTools(true, true, true).map((t) => t.name)).toContain("tool_call");
+  });
+
+  test("recipe search and skill_lint work without Treg; saving a recipe needs a write token", () => {
+    const read = visibleTools(false, true).map((t) => t.name);
+    expect(read).toContain("tool_search");
+    expect(read).toContain("skill_lint");
+    expect(read).not.toContain("tool_recipe_save");
+    expect(visibleTools(true, true).map((t) => t.name)).toContain("tool_recipe_save");
+  });
+
+  test("no tool is listed twice, with or without Treg", () => {
+    for (const tregOn of [false, true]) {
+      const names = visibleTools(true, true, tregOn).map((t) => t.name);
+      expect(new Set(names).size).toBe(names.length);
+    }
   });
 
   test("read-only visibility is a strict subset of write visibility", () => {

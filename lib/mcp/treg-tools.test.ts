@@ -13,11 +13,12 @@ import { isNumericOrgId, stringifyErrorField, clearOrgIdCache, extractOrgId } fr
  * verifying the filtering logic and the tregEnabled() function pattern.
  */
 
-const TREG_READ_TOOLS = ["tool_search", "tool_get"];
+// tool_search moved to recipe-tools.ts (recipes first, then this catalog) — see recipe-tools.test.ts.
+const TREG_READ_TOOLS = ["tool_get"];
 const TREG_WRITE_TOOLS = ["tool_call", "tool_balance"];
 
 describe("Treg tool flags", () => {
-  test("tool_search and tool_get are read-scope (no write flag)", () => {
+  test("tool_get is read-scope (no write flag)", () => {
     for (const name of TREG_READ_TOOLS) {
       expect(TREG_TOOL_MAP.get(name)?.write).toBeFalsy();
     }
@@ -64,15 +65,6 @@ describe("Treg scope filtering", () => {
 });
 
 describe("Treg tool schemas", () => {
-  test("tool_search requires query parameter", () => {
-    const schema = TREG_TOOL_MAP.get("tool_search")?.inputSchema as {
-      required?: string[];
-      properties?: Record<string, unknown>;
-    };
-    expect(schema.required).toContain("query");
-    expect(schema.properties).toHaveProperty("query");
-  });
-
   test("tool_get requires endpoint_id parameter", () => {
     const schema = TREG_TOOL_MAP.get("tool_get")?.inputSchema as {
       required?: string[];

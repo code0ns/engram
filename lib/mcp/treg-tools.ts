@@ -2,8 +2,11 @@
  * Treg MCP tools — expose Treg's external API catalog through Engram's MCP.
  *
  * Scope rules (match existing Engram patterns):
- *   read  — tool_search, tool_get (discovery only, no cost)
+ *   read  — tool_get (discovery only, no cost)
  *   write — tool_call, tool_balance (spend money or reveal balance)
+ *
+ * tool_search lives in recipe-tools.ts: it searches saved recipes before this catalog, and stays
+ * visible without a Treg token so those recipes remain findable.
  *
  * Credentials and spend limits are per workspace (lib/treg-config.ts): each handler resolves the
  * config for the workspace the call landed in. A workspace with no token of its own falls back to
@@ -11,7 +14,6 @@
  */
 
 import {
-  catalogSearch,
   catalogGet,
   catalogPriceUsd,
   call,
@@ -24,6 +26,7 @@ import {
   type HttpMethod,
   type TregConfig,
 } from "@/lib/treg";
+import { findRecipeByEndpoint, RECIPE_STALE_DAYS } from "@/lib/recipes";
 import type { Tool, ToolCtx } from "./tools";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -87,47 +90,22 @@ export function withoutDuplicateRaw(data: unknown): unknown {
   return { ...d, raw: strip(d.raw, 0) };
 }
 
+/**
+ * After a successful call: nudge toward saving a recipe, but only when there's something to gain.
+ * Never save automatically — each vault write is a git commit.
+ */
+function recipeNudge(dir: string, endpointId: string): string | undefined {
+  const r = findRecipeByEndpoint(dir, endpointId);
+  if (!r) {
+    return "If you will call this endpoint again, save it with tool_recipe_save so tool_search finds it without the catalog. Skip it for one-off calls: every save is a git commit.";
+  }
+  if (r.stale) {
+    return `Recipe ${r.path} was last verified ${r.last_verified ?? "never"} (over ${RECIPE_STALE_DAYS} days ago). This call worked, so re-save it with tool_recipe_save to refresh last_verified and the price.`;
+  }
+  return undefined;
+}
+
 export const TREG_TOOLS: Tool[] = [
-  {
-    name: "tool_search",
-    description:
-      "Search Treg's catalog of 2,600+ external API endpoints. Describe the TASK you want to do (e.g. 'get weather forecast', 'lookup company info', 'generate an image'), not a vendor name. " +
-      "Returns endpoints with their `endpoint_id`, price (`usd_per_call`), reliability score, and whether they need a key. " +
-      "WORKFLOW: search → inspect with tool_get → call with tool_call. Always check the price before calling.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        query: s("Task description — what you want to do (e.g. 'reverse geocode coordinates', 'enrich company by domain')"),
-        limit: { type: "number", description: "Max results (default 10)" },
-      },
-      required: ["query"],
-    },
-    handler: async ({ query, limit }: Args, ctx: ToolCtx) => {
-      const cfg = resolveTregConfig(wsOf(ctx));
-      try {
-        const result = await catalogSearch(cfg, String(query), typeof limit === "number" ? limit : undefined);
-        logTregCall("search", { success: true, workspace: cfg.ledgerKey });
-        return {
-          endpoints: result.results.map((e) => ({
-            endpoint_id: e.id,
-            provider: e.provider,
-            name: e.name,
-            description: e.summary,
-            // Treg returns cost in multiple possible locations: cost.usd or top-level usd_per_call
-            usd_per_call: e.cost?.usd ?? e.usd_per_call,
-            no_key_needed: e.platform_eligible,
-            reliability: e.observed?.ok_rate,
-          })),
-          total: result.total,
-          hint: "Use tool_get(endpoint_id) to see full parameters and exact price before calling.",
-        };
-      } catch (e) {
-        const msg = (e as Error)?.message ?? String(e);
-        logTregCall("search", { success: false, error: msg, workspace: cfg.ledgerKey });
-        throw e;
-      }
-    },
-  },
   {
     name: "tool_get",
     description:
@@ -208,10 +186,12 @@ export const TREG_TOOLS: Tool[] = [
       try {
         const result = await call(cfg, eid, p, { estimatedUsd: est, method: methodOverride });
         logTregCall("call", { endpointId: eid, usdEstimate: result.cost_usd, success: true, workspace: cfg.ledgerKey });
+        const hint = recipeNudge(ctx.dir, eid);
         return {
           data: withoutDuplicateRaw(result.data),
           call_id: result.call_id,
           usd_charged: result.cost_usd,
+          ...(hint ? { hint } : {}),
         };
       } catch (e) {
         const msg = (e as Error)?.message ?? String(e);

@@ -24,6 +24,8 @@ import {
 } from "@/lib/vault/write";
 import { hasRead, recordRead } from "./session";
 import { TREG_TOOLS, TREG_TOOL_MAP } from "./treg-tools";
+import { RECIPE_TOOLS, RECIPE_TOOL_MAP } from "./recipe-tools";
+import { SKILL_TOOLS, SKILL_TOOL_MAP } from "./skill-tools";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Args = Record<string, any>;
@@ -372,10 +374,10 @@ export const TOOLS: Tool[] = [
 /** All brain_* tools (the core vault surface). */
 export const TOOL_MAP = new Map(TOOLS.map((t) => [t.name, t]));
 
-/** All tools including Treg — used by callTool. */
-const ALL_TOOL_MAP = new Map([...TOOL_MAP, ...TREG_TOOL_MAP]);
+/** All tools including recipes, skills and Treg — used by callTool. */
+const ALL_TOOL_MAP = new Map([...TOOL_MAP, ...RECIPE_TOOL_MAP, ...SKILL_TOOL_MAP, ...TREG_TOOL_MAP]);
 
-/** Lookup a tool by name (includes Treg tools). */
+/** Lookup a tool by name (includes recipe, skill and Treg tools). */
 export function getTool(name: string): Tool | undefined {
   return ALL_TOOL_MAP.get(name);
 }
@@ -389,20 +391,15 @@ export function getTool(name: string): Tool | undefined {
  * tests can pin, rather than as a filter expression inline in a request handler.
  *
  * The auto-filing harness stays hidden unless it's turned on — agents file notes themselves.
- * Treg tools are hidden unless the caller's workspace has a Treg token (its own or the shared env
- * one) — `tregOn` is that per-workspace answer — matching how brain_capture is hidden.
+ * Recipe and skill tools work on vault notes alone, so they are always visible (tool_search falls
+ * back to recipes only when there is no Treg token). The Treg tools are hidden unless the caller's
+ * workspace has a Treg token (its own or the shared env one) — `tregOn` is that per-workspace
+ * answer — matching how brain_capture is hidden.
  */
 export function visibleTools(canWrite: boolean, harnessOn: boolean, tregOn = false): Tool[] {
-  const brainTools = TOOLS.filter((t) => {
-    if (t.name === "brain_capture" && !harnessOn) return false;
-    if (t.write && !canWrite) return false;
-    return true;
-  });
-  if (!tregOn) return brainTools;
-
-  const tregTools = TREG_TOOLS.filter((t) => {
-    if (t.write && !canWrite) return false;
-    return true;
-  });
-  return [...brainTools, ...tregTools];
+  const scoped = (t: Tool) => canWrite || !t.write;
+  const brainTools = TOOLS.filter((t) => scoped(t) && (t.name !== "brain_capture" || harnessOn));
+  const vaultTools = [...brainTools, ...RECIPE_TOOLS.filter(scoped), ...SKILL_TOOLS.filter(scoped)];
+  if (!tregOn) return vaultTools;
+  return [...vaultTools, ...TREG_TOOLS.filter(scoped)];
 }
