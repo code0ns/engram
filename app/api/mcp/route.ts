@@ -6,6 +6,7 @@ import { withActor } from "@/lib/actor";
 import { VERSION } from "@/lib/version";
 import { getTool, visibleTools } from "@/lib/mcp/tools";
 import { callTool } from "@/lib/mcp/call";
+import { serverInstructions } from "@/lib/mcp/instructions";
 import { resolveTregConfig, tregEnabled } from "@/lib/treg";
 import {
   resolveTokenWorkspace,
@@ -68,6 +69,20 @@ function resolveEffectiveWorkspace(caller: Caller): ResolvedWorkspace | null {
   return resolveTokenWorkspace(caller.workspace);
 }
 
+/**
+ * The tools this caller sees — shared by tools/list and the initialize instructions, so the
+ * instructions never name a tool the client can't call.
+ */
+function toolsFor(caller: Caller) {
+  // Treg tools show only when this caller's workspace has a Treg token (own or shared).
+  const ws = resolveEffectiveWorkspace(caller);
+  const tregOn = ws ? tregEnabled(resolveTregConfig(ws.workspaceId)) : false;
+  const tools = visibleTools(caller.scope === "write", harnessEnabled(), tregOn);
+  // Workspace tools are always visible (read-scope sees list, write-scope sees both).
+  const wkTools = WORKSPACE_TOOLS.filter((t) => !t.write || caller.scope === "write");
+  return [...tools, ...wkTools];
+}
+
 async function handleMessage(
   msg: Json,
   caller: Caller,
@@ -85,21 +100,14 @@ async function handleMessage(
         protocolVersion: params?.protocolVersion || PROTOCOL,
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: "engram", version: VERSION },
+        instructions: serverInstructions(toolsFor(caller).map((t) => t.name)),
       });
     case "ping":
       return rpc(id, {});
-    case "tools/list": {
-      // Treg tools show only when this caller's workspace has a Treg token (own or shared).
-      const listWs = resolveEffectiveWorkspace(caller);
-      const tregOn = listWs ? tregEnabled(resolveTregConfig(listWs.workspaceId)) : false;
-      const tools = visibleTools(caller.scope === "write", harnessEnabled(), tregOn);
-      // Include workspace tools - they're always visible (read-scope sees list, write-scope sees both)
-      const wkTools = WORKSPACE_TOOLS.filter((t) => !t.write || caller.scope === "write");
-      const allTools = [...tools, ...wkTools];
+    case "tools/list":
       return rpc(id, {
-        tools: allTools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
+        tools: toolsFor(caller).map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
       });
-    }
     case "tools/call": {
       const toolName = params?.name;
 
