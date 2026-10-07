@@ -10,8 +10,14 @@
  *   TREG_MAX_USD_PER_CALL — Maximum cost per tool_call (default: 0.01)
  *   TREG_MAX_USD_PER_DAY  — Maximum spend per workspace per UTC day (default: 1.00)
  *
+ * Catalog shape:
+ *   `GET /catalog/endpoints/:id` answers `{ endpoint, provider, call_template, siblings, routing, … }`
+ *   — the endpoint's own fields (method, cost, input) are nested under `endpoint`, and `provider` is
+ *   provider info, not the provider id. `normalizeCatalogGet` flattens it (and still accepts the older
+ *   flat shape). Reading the top level directly is what made every price $0 and every method POST.
+ *
  * HTTP method selection:
- *   Treg endpoints can be GET or POST (or other methods). The catalog's top-level `method` field
+ *   Treg endpoints can be GET or POST (or other methods). The catalog's `method` field
  *   wins, then the `call_template` (`--method GET`), then POST:
  *   - GET/DELETE endpoints: params go in the query string
  *   - POST/PUT/PATCH endpoints: params go in the request body as JSON
@@ -73,7 +79,40 @@ interface EndpointInfo {
   method: HttpMethod;
   /** Catalog price in USD, when the catalog states one. */
   priceUsd?: number;
+  /**
+   * A routed endpoint (`treg.*`) tries child providers in turn and bills each one tried that charges
+   * for a miss, so its stated price is a floor, not a ceiling. `call()` bounds it with a header.
+   */
+  routed: boolean;
   at: number;
+}
+
+/** Treg's per-call ceiling for a routed endpoint (its own default is $1.00 — far above any cap here). */
+export const ROUTE_MAX_COST_HEADER = "X-Treg-Route-Max-Cost";
+
+/** True when the catalog entry is a routed endpoint whose real cost depends on which child serves it. */
+export function isRoutedEndpoint(info: Pick<TregCatalogGetResult, "kind" | "routing">): boolean {
+  return info.kind === "routed" || (typeof info.routing === "object" && info.routing !== null);
+}
+
+/**
+ * Flatten `GET /catalog/endpoints/:id`. The endpoint's fields live under `endpoint`; `call_template`,
+ * `siblings`, `routing` and `hints` sit beside it. The older flat shape (fields at the top level) is
+ * returned unchanged.
+ */
+export function normalizeCatalogGet(raw: unknown): TregCatalogGetResult {
+  if (typeof raw !== "object" || raw === null) return raw as TregCatalogGetResult;
+  const top = raw as Record<string, unknown>;
+  const ep = top.endpoint;
+  if (typeof ep !== "object" || ep === null) return raw as TregCatalogGetResult;
+  const e = ep as Record<string, unknown>;
+  return {
+    ...(e as unknown as TregCatalogGetResult),
+    call_template: (e.call_template ?? top.call_template) as string | undefined,
+    siblings: (e.siblings ?? top.siblings) as TregCatalogGetResult["siblings"],
+    routing: (e.routing ?? top.routing) as TregCatalogGetResult["routing"],
+    hints: (e.hints ?? top.hints) as string[] | undefined,
+  };
 }
 
 /** Prices change; a method never does. Re-read the catalog at most this often per endpoint. */
@@ -106,6 +145,7 @@ async function getEndpointInfo(cfg: TregConfig, endpointId: string): Promise<End
   const entry: EndpointInfo = {
     method: normalizeHttpMethod(info.method) ?? extractMethodFromTemplate(info.call_template) ?? "POST",
     priceUsd: catalogPriceUsd(info),
+    routed: isRoutedEndpoint(info),
     at: Date.now(),
   };
   endpointInfoCache.set(key, entry);
@@ -304,6 +344,14 @@ export interface TregCatalogGetResult {
   input?: Record<string, unknown>;
   output?: Record<string, unknown>;
   call_template?: string;
+  /** "routed" for `treg.*` endpoints that pick a child provider per call. */
+  kind?: string;
+  /** Present on routed endpoints: the ordered child plan and their prices. */
+  routing?: {
+    plan?: Array<{ endpoint_id: string; usd?: number | null }>;
+    also?: Array<{ endpoint_id: string; usd?: number | null }>;
+  };
+  hints?: string[];
   siblings?: Array<{
     id: string;
     provider: string;
@@ -335,6 +383,7 @@ interface TregFetchOptions {
   method?: HttpMethod;
   body?: Record<string, unknown>;
   query?: Record<string, string | number | boolean | undefined>;
+  headers?: Record<string, string>;
 }
 
 async function tregFetch<T>(cfg: TregConfig, endpoint: string, options: TregFetchOptions = {}): Promise<T> {
@@ -342,7 +391,7 @@ async function tregFetch<T>(cfg: TregConfig, endpoint: string, options: TregFetc
     throw new Error("Treg is not configured for this workspace — set a Treg token (Access > Workspaces > Settings) or TREG_TOKEN.");
   }
 
-  const { method = "GET", body, query } = options;
+  const { method = "GET", body, query, headers } = options;
 
   let url = `${cfg.baseUrl}${endpoint}`;
   if (query) {
@@ -358,6 +407,7 @@ async function tregFetch<T>(cfg: TregConfig, endpoint: string, options: TregFetc
     method,
     headers: {
       "Content-Type": "application/json",
+      ...headers,
       "X-Treg-Token": cfg.token,
     },
     body: body ? JSON.stringify(body) : undefined,
@@ -385,7 +435,7 @@ export async function catalogSearch(cfg: TregConfig, query: string, limit?: numb
  * Safe for read-scope tokens — no cost, no side effects.
  */
 export async function catalogGet(cfg: TregConfig, endpointId: string): Promise<TregCatalogGetResult> {
-  return tregFetch<TregCatalogGetResult>(cfg, `/catalog/endpoints/${encodeURIComponent(endpointId)}`);
+  return normalizeCatalogGet(await tregFetch<unknown>(cfg, `/catalog/endpoints/${encodeURIComponent(endpointId)}`));
 }
 
 /**
@@ -398,12 +448,18 @@ export interface TregCallOptions {
   estimatedUsd?: number;
 }
 
-/** Pull the charged amount / call id out of whatever shape Treg answered with. */
-function readCharge(res: unknown): { chargedUsd?: number; callId?: string } {
+/**
+ * Pull the charged amount / call id out of whatever shape Treg answered with. Routed calls report
+ * the real charge as `_treg.charged_micro` (millionths of a USD); missing it made the ledger record
+ * the estimate instead (e.g. $0.0009 for a call that cost $0.0004).
+ */
+export function readCharge(res: unknown): { chargedUsd?: number; callId?: string } {
   if (typeof res !== "object" || res === null) return {};
   const r = res as Record<string, unknown>;
   const cost = r.cost as { usd?: unknown } | undefined;
-  const candidates = [r.cost_usd, r.usd_charged, cost?.usd];
+  const meta = r._treg as { charged_micro?: unknown } | undefined;
+  const micro = typeof meta?.charged_micro === "number" ? meta.charged_micro / 1_000_000 : undefined;
+  const candidates = [r.cost_usd, r.usd_charged, cost?.usd, micro];
   const chargedUsd = candidates.find((c): c is number => typeof c === "number" && Number.isFinite(c) && c >= 0);
   return { chargedUsd, callId: typeof r.call_id === "string" ? r.call_id : undefined };
 }
@@ -416,6 +472,13 @@ function readCharge(res: unknown): { chargedUsd?: number; callId?: string } {
  * estimate; it cannot change the catalog). The call is refused when that price exceeds the
  * per-call cap, or when today's spend plus this call would exceed the daily cap. The price is
  * reserved against the daily ledger before the request and settled to the real charge after.
+ *
+ * Two gaps a $0 price would open are closed explicitly:
+ * - A non-routed endpoint whose catalog states no price is refused unless the caller passes
+ *   `estimatedUsd` — otherwise the caps would be checked against $0.
+ * - A routed endpoint's stated price is only a floor (Treg tries children in turn, billing misses),
+ *   so the call carries `X-Treg-Route-Max-Cost` = the smaller of the per-call cap and what is left of
+ *   today's cap, and Treg itself enforces it. That worst case is what gets reserved.
  *
  * HTTP method selection:
  * - If `options.method` is provided, uses that
@@ -455,6 +518,14 @@ export async function call(
     }
   }
 
+  const routed = info?.routed === true;
+  if (info && !routed && info.priceUsd === undefined && estimatedUsd === undefined) {
+    throw new Error(
+      `Refusing tool_call: the catalog states no price for "${endpointId}", so the spend caps can't be checked. ` +
+        `Pass estimated_usd (the price tool_search shows for it).`,
+    );
+  }
+
   const price = Math.max(estimatedUsd ?? 0, info?.priceUsd ?? 0);
   if (price > cfg.perCallCapUsd) throw perCallCapError(price, cfg.perCallCapUsd);
 
@@ -467,26 +538,32 @@ export async function call(
     );
   }
 
+  // A routed call can cost more than its stated price (Treg's own ceiling defaults to $1), so bound
+  // the whole call by this workspace's caps and reserve that worst case.
+  const ceiling = routed ? Math.max(0, Math.min(cfg.perCallCapUsd, cfg.dailyCapUsd - spent)) : undefined;
+  const reserved = ceiling ?? price;
+
   const method = options.method ?? info?.method ?? "POST";
   const hasParams = Object.keys(params).length > 0;
   const useBody = BODY_METHODS.includes(method);
 
-  recordSpend(cfg.ledgerKey, price); // reserve
+  recordSpend(cfg.ledgerKey, reserved); // reserve
   let res: unknown;
   try {
     res = await tregFetch<unknown>(cfg, `/call/${encodeURIComponent(endpointId)}`, {
       method,
       body: useBody && hasParams ? params : undefined,
       query: !useBody && hasParams ? (params as Record<string, string | number | boolean | undefined>) : undefined,
+      headers: ceiling !== undefined ? { [ROUTE_MAX_COST_HEADER]: ceiling.toFixed(6) } : undefined,
     });
   } catch (e) {
-    recordSpend(cfg.ledgerKey, -price); // a failed call isn't charged
+    recordSpend(cfg.ledgerKey, -reserved); // a failed call isn't charged
     throw e;
   }
 
   const { chargedUsd, callId } = readCharge(res);
-  const charged = chargedUsd ?? price;
-  recordSpend(cfg.ledgerKey, charged - price); // settle to the real charge
+  const charged = chargedUsd ?? reserved;
+  recordSpend(cfg.ledgerKey, charged - reserved); // settle to the real charge
 
   return { data: res, call_id: callId, cost_usd: charged };
 }

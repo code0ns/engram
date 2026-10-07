@@ -16,10 +16,13 @@ import {
   catalogPriceUsd,
   call,
   balance,
+  isRoutedEndpoint,
   logTregCall,
+  normalizeHttpMethod,
   resolveTregConfig,
   spentToday,
   type HttpMethod,
+  type TregConfig,
 } from "@/lib/treg";
 import type { Tool, ToolCtx } from "./tools";
 
@@ -29,6 +32,60 @@ type Args = Record<string, any>;
 const s = (description: string) => ({ type: "string", description });
 
 const wsOf = (ctx: ToolCtx) => ctx.workspaceId ?? null;
+
+const usd = (n: number) => `$${n.toFixed(4)}`;
+
+/** What tool_get tells the agent about price vs. this workspace's caps. Never claims "within cap" for an unknown price. */
+export function priceHint(cfg: TregConfig, usdPerCall: number | undefined, routed: boolean): string {
+  const remaining = Math.max(0, cfg.dailyCapUsd - spentToday(cfg.ledgerKey));
+  const caps = `per-call cap ${usd(cfg.perCallCapUsd)}; ${usd(remaining)} left of today's ${usd(cfg.dailyCapUsd)} daily cap`;
+  if (routed) {
+    return (
+      `Routed endpoint: Treg tries providers in turn and bills each one tried that charges for a miss, so ${usdPerCall === undefined ? "the cost" : `the listed ${usd(usdPerCall)}`} is a floor. ` +
+      `tool_call caps the whole call at ${usd(Math.min(cfg.perCallCapUsd, remaining))} (${caps}). To pay one known price, call a sibling directly.`
+    );
+  }
+  if (usdPerCall === undefined) {
+    return `WARNING: the catalog states no price for this endpoint. tool_call will refuse it unless you pass estimated_usd (the price tool_search shows). ${caps}.`;
+  }
+  if (usdPerCall > cfg.perCallCapUsd) {
+    return `WARNING: This endpoint costs ${usd(usdPerCall)}/call, which exceeds this workspace's per-call cap of ${usd(cfg.perCallCapUsd)}. tool_call will refuse it unless a workspace admin raises the cap.`;
+  }
+  if (usdPerCall > remaining) {
+    return `WARNING: This endpoint costs ${usd(usdPerCall)}/call but only ${usd(remaining)} is left of today's ${usd(cfg.dailyCapUsd)} daily cap. tool_call will refuse it.`;
+  }
+  return `Price ${usd(usdPerCall)}/call — within the ${caps}.`;
+}
+
+export const DUPLICATE_MARKER = "(same as output)";
+
+/**
+ * Routed calls answer `{ output, raw, _treg }` where `raw` is the provider's own body — and it
+ * repeats the result arrays already in `output` (a search's hits came back twice, doubling tokens).
+ * Replace each array in `raw` that exactly equals one in `output` with a marker; everything else in
+ * `raw` (paging cursors, provider, cost) is kept.
+ */
+export function withoutDuplicateRaw(data: unknown): unknown {
+  if (typeof data !== "object" || data === null || !("output" in data) || !("raw" in data)) return data;
+  const d = data as { output: unknown; raw: unknown };
+  const seen = new Set<string>();
+  const collect = (v: unknown, depth: number) => {
+    if (depth > 5 || typeof v !== "object" || v === null) return;
+    if (Array.isArray(v)) {
+      if (v.length > 0) seen.add(JSON.stringify(v));
+      return;
+    }
+    for (const child of Object.values(v)) collect(child, depth + 1);
+  };
+  collect(d.output, 0);
+  if (seen.size === 0) return data;
+  const strip = (v: unknown, depth: number): unknown => {
+    if (depth > 6 || typeof v !== "object" || v === null) return v;
+    if (Array.isArray(v)) return seen.has(JSON.stringify(v)) ? DUPLICATE_MARKER : v;
+    return Object.fromEntries(Object.entries(v).map(([k, child]) => [k, strip(child, depth + 1)]));
+  };
+  return { ...d, raw: strip(d.raw, 0) };
+}
 
 export const TREG_TOOLS: Tool[] = [
   {
@@ -88,29 +145,24 @@ export const TREG_TOOLS: Tool[] = [
       try {
         const result = await catalogGet(cfg, String(endpoint_id));
         logTregCall("get", { endpointId: String(endpoint_id), success: true, workspace: cfg.ledgerKey });
-        const usdPerCall = catalogPriceUsd(result) ?? 0;
-        const spent = spentToday(cfg.ledgerKey);
-        const remaining = Math.max(0, cfg.dailyCapUsd - spent);
-        let hint: string;
-        if (usdPerCall > cfg.perCallCapUsd) {
-          hint = `WARNING: This endpoint costs $${usdPerCall.toFixed(4)}/call, which exceeds this workspace's per-call cap of $${cfg.perCallCapUsd.toFixed(4)}. tool_call will refuse it unless a workspace admin raises the cap.`;
-        } else if (usdPerCall > remaining) {
-          hint = `WARNING: This endpoint costs $${usdPerCall.toFixed(4)}/call but only $${remaining.toFixed(4)} is left of today's $${cfg.dailyCapUsd.toFixed(4)} daily cap. tool_call will refuse it.`;
-        } else {
-          hint = `Price $${usdPerCall.toFixed(4)}/call — within the per-call cap ($${cfg.perCallCapUsd.toFixed(4)}); $${remaining.toFixed(4)} left of today's daily cap.`;
-        }
+        const usdPerCall = catalogPriceUsd(result);
+        const routed = isRoutedEndpoint(result);
         return {
           endpoint_id: result.id,
           provider: result.provider,
           name: result.name,
           description: result.summary,
-          usd_per_call: usdPerCall,
+          // null, not 0, when the catalog states no price — a 0 here once read as "free, within cap".
+          usd_per_call: usdPerCall ?? null,
+          method: normalizeHttpMethod(result.method) ?? null,
+          routed,
           no_key_needed: result.platform_eligible,
           reliability: result.observed?.ok_rate,
           parameters: result.input,
           call_template: result.call_template,
-          siblings: result.siblings,
-          hint,
+          // id + price only: full sibling records made a routed endpoint's answer ~72 KB.
+          siblings: result.siblings?.map((sib) => ({ id: sib.id, provider: sib.provider, usd_per_call: catalogPriceUsd(sib) ?? null })),
+          hint: priceHint(cfg, usdPerCall, routed),
         };
       } catch (e) {
         const msg = (e as Error)?.message ?? String(e);
@@ -126,13 +178,18 @@ export const TREG_TOOLS: Tool[] = [
       "Call a Treg endpoint. THIS COSTS MONEY — this workspace's Treg balance is charged. " +
       "Calls above the workspace's per-call cap, or that would push today's spend over its daily cap, are refused; ask a workspace admin to raise the cap or get human approval. " +
       "Always use tool_get first to confirm the price and required parameters. " +
+      "Routed endpoints (treg.*) are capped at the per-call cap for the whole call, since Treg may try several providers. " +
       "The HTTP method (GET/POST) is determined from the catalog; for GET endpoints, params are sent as query string, not JSON body.",
     inputSchema: {
       type: "object",
       properties: {
         endpoint_id: s("The endpoint ID to call"),
         params: { type: "object", description: "Parameters for the endpoint (see tool_get for schema)" },
-        estimated_usd: { type: "number", description: "Expected cost from tool_get. Advisory — the catalog price is what is enforced." },
+        estimated_usd: {
+          type: "number",
+          description:
+            "Expected cost (from tool_search / tool_get). The higher of this and the catalog price is enforced; required when the catalog states no price.",
+        },
         method: {
           type: "string",
           enum: ["GET", "POST", "PUT", "PATCH", "DELETE"],
@@ -152,7 +209,7 @@ export const TREG_TOOLS: Tool[] = [
         const result = await call(cfg, eid, p, { estimatedUsd: est, method: methodOverride });
         logTregCall("call", { endpointId: eid, usdEstimate: result.cost_usd, success: true, workspace: cfg.ledgerKey });
         return {
-          data: result.data,
+          data: withoutDuplicateRaw(result.data),
           call_id: result.call_id,
           usd_charged: result.cost_usd,
         };

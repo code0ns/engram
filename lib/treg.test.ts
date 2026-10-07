@@ -2,8 +2,11 @@ import { describe, expect, test, beforeEach, afterEach, mock } from "bun:test";
 import {
   call,
   extractMethodFromTemplate,
+  normalizeCatalogGet,
   normalizeHttpMethod,
+  readCharge,
   clearEndpointMethodCache,
+  ROUTE_MAX_COST_HEADER,
   TREG_MAX_USD_PER_CALL,
   type TregConfig,
 } from "./treg";
@@ -158,6 +161,35 @@ interface FakeEndpoint {
   template?: string;
   callStatus?: number;
   callBody?: unknown;
+  /** A `treg.*` routed endpoint (kind + routing plan). */
+  routed?: boolean;
+  /** Answer in the older flat catalog shape instead of the real nested one. */
+  flat?: boolean;
+}
+
+/**
+ * What `GET /catalog/endpoints/:id` really answers (captured from treg.to, 2026-10-07): the endpoint
+ * under `endpoint`, provider *info* under `provider`, call_template/siblings/routing beside them.
+ */
+function catalogBody(id: string, e: FakeEndpoint) {
+  const endpoint = {
+    id,
+    provider: "test",
+    name: id,
+    method: e.method,
+    call_template: e.template,
+    cost: e.price === undefined ? undefined : { type: "per_call", usd: e.price },
+    kind: e.routed ? "routed" : "data",
+  };
+  if (e.flat) return endpoint;
+  return {
+    endpoint,
+    provider: { service: "test", display_name: "Test" },
+    call_template: e.template,
+    siblings: [],
+    hints: [],
+    ...(e.routed ? { routing: { plan: [{ endpoint_id: "child.a", usd: 0.0005 }, { endpoint_id: "child.b", usd: 0.02 }] } } : {}),
+  };
 }
 
 /**
@@ -173,8 +205,8 @@ describe("Treg calls (mocked fetch)", () => {
     clearEndpointMethodCache();
     fetchCalls = [];
     endpoints = {
-      "get-endpoint": { template: "treg call get-endpoint --method GET" },
-      "post-endpoint": { template: "treg call post-endpoint --method POST" },
+      "get-endpoint": { template: "treg call get-endpoint --method GET", price: 0.001 },
+      "post-endpoint": { template: "treg call post-endpoint --method POST", price: 0.001 },
       "diffbot.x.extract-article": {
         method: "GET",
         template: "treg call diffbot.x.extract-article --query url=https://...",
@@ -192,16 +224,7 @@ describe("Treg calls (mocked fetch)", () => {
       const cat = url.match(/\/catalog\/endpoints\/([^?]+)/);
       if (cat) {
         const id = decodeURIComponent(cat[1]);
-        const e = endpoints[id];
-        if (!e) return json({ id, provider: "test", name: id }); // priceless, methodless
-        return json({
-          id,
-          provider: "test",
-          name: id,
-          method: e.method,
-          call_template: e.template,
-          cost: e.price === undefined ? undefined : { usd: e.price },
-        });
+        return json(catalogBody(id, endpoints[id] ?? {})); // unknown id: priceless, methodless
       }
 
       const callM = url.match(/\/call\/([^?]+)/);
@@ -252,7 +275,7 @@ describe("Treg calls (mocked fetch)", () => {
   });
 
   test("method override wins over the catalog's method (the catalog is still read for the price)", async () => {
-    await call(cfg(), "some-endpoint", { param: "value" }, { method: "DELETE" });
+    await call(cfg(), "some-endpoint", { param: "value" }, { method: "DELETE", estimatedUsd: 0.001 });
 
     const callRequest = fetchCalls.find((c) => c.url.includes("/call/some-endpoint"));
     expect(callRequest!.options.method).toBe("DELETE");
@@ -350,5 +373,100 @@ describe("Treg calls (mocked fetch)", () => {
     globalThis.fetch = mock(async () => new Response("down", { status: 503 })) as typeof globalThis.fetch;
     await expect(call(cfg(), "x", {})).rejects.toThrow(/could not read the catalog price/i);
     await expect(call(cfg(), "x", {}, { estimatedUsd: 0.001 })).rejects.toThrow(/could not read the catalog price/i);
+  });
+
+  // ── the real (nested) catalog shape — cycle 06 regressions ─────────────────
+
+  test("nested catalog: the price under endpoint.cost is enforced (it used to read as $0)", async () => {
+    endpoints["nested-pricey"] = { price: 0.03, method: "POST" };
+    await expect(call(cfg({ perCallCapUsd: 0.01 }), "nested-pricey", {})).rejects.toThrow(/exceeds the cap/i);
+    expect(fetchCalls.some((c) => c.url.includes("/call/nested-pricey"))).toBe(false);
+  });
+
+  test("the older flat catalog shape still works", async () => {
+    endpoints["flat-get"] = { flat: true, method: "GET", price: 0.001 };
+    await call(cfg(), "flat-get", { q: "x" });
+    expect(fetchCalls.find((c) => c.url.includes("/call/flat-get"))!.options.method).toBe("GET");
+  });
+
+  test("a non-routed endpoint with no stated price is refused unless estimated_usd is given", async () => {
+    await expect(call(cfg(), "unpriced", {})).rejects.toThrow(/states no price/i);
+    expect(fetchCalls.some((c) => c.url.includes("/call/unpriced"))).toBe(false);
+
+    await call(cfg(), "unpriced", {}, { estimatedUsd: 0.002 });
+    expect(fetchCalls.some((c) => c.url.includes("/call/unpriced"))).toBe(true);
+  });
+
+  test("routed: the whole call is capped via X-Treg-Route-Max-Cost, even when its listed price is $0", async () => {
+    endpoints["treg.web.extract"] = { routed: true, method: "POST", price: 0 };
+    const c = cfg({ perCallCapUsd: 0.01, dailyCapUsd: 1 });
+    await call(c, "treg.web.extract", { url: "https://example.com" });
+
+    const req = fetchCalls.find((x) => x.url.includes("/call/treg.web.extract"))!;
+    expect((req.options.headers as Record<string, string>)[ROUTE_MAX_COST_HEADER]).toBe("0.010000");
+  });
+
+  test("routed: the ceiling shrinks to what is left of the daily cap", async () => {
+    endpoints["cheap"] = { price: 0.004 };
+    endpoints["treg.google.serp.organic"] = { routed: true, method: "POST", price: 0.0009 };
+    const c = cfg({ perCallCapUsd: 0.01, dailyCapUsd: 0.006 });
+    await call(c, "cheap", {}); // $0.004 spent, $0.002 left
+
+    await call(c, "treg.google.serp.organic", { q: "x" });
+    const req = fetchCalls.find((x) => x.url.includes("/call/treg.google.serp.organic"))!;
+    expect((req.options.headers as Record<string, string>)[ROUTE_MAX_COST_HEADER]).toBe("0.002000");
+  });
+
+  test("routed: reserve the ceiling, then settle to Treg's _treg.charged_micro", async () => {
+    endpoints["treg.google.serp.organic"] = {
+      routed: true,
+      method: "POST",
+      price: 0.0009,
+      callBody: { output: { results: [] }, _treg: { charged_micro: 400 } },
+    };
+    const c = cfg({ perCallCapUsd: 0.01 });
+    const res = await call(c, "treg.google.serp.organic", { q: "x" });
+    expect(res.cost_usd).toBeCloseTo(0.0004, 7);
+    expect(spentToday(c.ledgerKey)).toBeCloseTo(0.0004, 7);
+  });
+
+  test("non-routed calls send no route ceiling header", async () => {
+    await call(cfg(), "post-endpoint", { a: 1 });
+    const req = fetchCalls.find((x) => x.url.includes("/call/post-endpoint"))!;
+    expect((req.options.headers as Record<string, string>)[ROUTE_MAX_COST_HEADER]).toBeUndefined();
+  });
+});
+
+describe("normalizeCatalogGet", () => {
+  test("flattens the nested shape and keeps call_template / siblings / routing beside it", () => {
+    const n = normalizeCatalogGet({
+      endpoint: { id: "diffbot.x.extract-article", provider: "diffbot", method: "GET", cost: { usd: 0.001196 } },
+      provider: { service: "diffbot", display_name: "Diffbot" },
+      call_template: "treg call diffbot.x.extract-article --query url=…",
+      siblings: [{ id: "a", provider: "p" }],
+      routing: { plan: [] },
+    });
+    expect(n.id).toBe("diffbot.x.extract-article");
+    expect(n.provider).toBe("diffbot"); // the id, not the info object
+    expect(n.method).toBe("GET");
+    expect(n.cost?.usd).toBe(0.001196);
+    expect(n.call_template).toContain("treg call");
+    expect(n.siblings).toHaveLength(1);
+    expect(n.routing).toEqual({ plan: [] });
+  });
+
+  test("returns a flat entry unchanged", () => {
+    const flat = { id: "x", provider: "p", name: "x", method: "POST" };
+    expect(normalizeCatalogGet(flat)).toEqual(flat);
+  });
+});
+
+describe("readCharge", () => {
+  test("reads Treg's _treg.charged_micro (millionths of a dollar)", () => {
+    expect(readCharge({ output: {}, _treg: { charged_micro: 400 } }).chargedUsd).toBeCloseTo(0.0004, 7);
+  });
+
+  test("an explicit cost_usd still wins", () => {
+    expect(readCharge({ cost_usd: 0.002, _treg: { charged_micro: 400 } }).chargedUsd).toBe(0.002);
   });
 });

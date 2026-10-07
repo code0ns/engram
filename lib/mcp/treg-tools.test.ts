@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { TREG_TOOLS, TREG_TOOL_MAP } from "./treg-tools";
+import { TREG_TOOLS, TREG_TOOL_MAP, DUPLICATE_MARKER, priceHint, withoutDuplicateRaw } from "./treg-tools";
 import { isNumericOrgId, stringifyErrorField, clearOrgIdCache, extractOrgId } from "@/lib/treg";
 
 /**
@@ -321,5 +321,61 @@ describe("Treg org ID extraction", () => {
       expect(`/orgs/${id}/balance`).not.toContain("undefined");
       expect(`/orgs/${id}/balance`).toMatch(/^\/orgs\/\d+\/balance$/);
     }
+  });
+});
+
+describe("tool_get price hint", () => {
+  const cfg = async () => ({
+    ...(await import("@/lib/treg")).resolveTregConfig(null),
+    perCallCapUsd: 0.01,
+    dailyCapUsd: 1,
+    ledgerKey: `hint-${crypto.randomUUID()}`,
+  });
+
+  test("an unknown price never reads as 'within cap' (cycle 06: $0 + 'within the per-call cap')", async () => {
+    const hint = priceHint(await cfg(), undefined, false);
+    expect(hint).not.toMatch(/within/);
+    expect(hint).toMatch(/states no price/);
+    expect(hint).toMatch(/estimated_usd/);
+  });
+
+  test("a routed endpoint's price is described as a floor, with the call ceiling", async () => {
+    const hint = priceHint(await cfg(), 0, true);
+    expect(hint).toMatch(/Routed endpoint/);
+    expect(hint).toMatch(/floor/);
+    expect(hint).toContain("$0.0100");
+  });
+
+  test("a known price within the caps says so", async () => {
+    expect(priceHint(await cfg(), 0.0012, false)).toMatch(/^Price \$0\.0012\/call — within/);
+  });
+
+  test("over the per-call cap warns", async () => {
+    expect(priceHint(await cfg(), 0.03, false)).toMatch(/WARNING.*exceeds/);
+  });
+});
+
+describe("withoutDuplicateRaw", () => {
+  // Shape of a routed SERP call result seen in cycle 06 (trimmed).
+  const results = [{ link: "https://a", title: "A" }, { link: "https://b", title: "B" }];
+  const data = {
+    output: { results, count: 2 },
+    raw: { output: { data: { nextCursor: "cur_1", query: "q", results }, found: true }, provider: "AnyAPI", costUsd: 0.0004 },
+    _treg: { charged_micro: 400 },
+  };
+
+  test("replaces the repeated results in raw but keeps the cursor and cost", () => {
+    const out = withoutDuplicateRaw(data) as typeof data;
+    expect(out.output.results).toEqual(results);
+    const raw = out.raw as unknown as { output: { data: Record<string, unknown> }; provider: string; costUsd: number };
+    expect(raw.output.data.results).toBe(DUPLICATE_MARKER);
+    expect(raw.output.data.nextCursor).toBe("cur_1");
+    expect(raw.costUsd).toBe(0.0004);
+    expect(JSON.stringify(out).length).toBeLessThan(JSON.stringify(data).length);
+  });
+
+  test("leaves non-routed payloads alone", () => {
+    const diffbot = { request: { api: "article" }, objects: [{ title: "Memp" }] };
+    expect(withoutDuplicateRaw(diffbot)).toBe(diffbot);
   });
 });
