@@ -71,13 +71,17 @@ async function main() {
 
   const { TOOLS } = await import("@/lib/mcp/tools");
   const { callTool } = await import("@/lib/mcp/call");
+  const { serverInstructions } = await import("@/lib/mcp/instructions");
   const { VERSION } = await import("@/lib/version");
   const { VAULT_DIR } = await import("@/lib/config");
   const { Server } = await import("@modelcontextprotocol/sdk/server/index.js");
   const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
   const { ListToolsRequestSchema, CallToolRequestSchema } = await import("@modelcontextprotocol/sdk/types.js");
 
-  const server = new Server({ name: "engram", version: VERSION }, { capabilities: { tools: {} } });
+  const server = new Server(
+    { name: "engram", version: VERSION },
+    { capabilities: { tools: {} }, instructions: serverInstructions(TOOLS.map((t) => t.name)) },
+  );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: TOOLS.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
