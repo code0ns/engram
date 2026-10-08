@@ -1,4 +1,4 @@
-import { currentActor } from "@/lib/actor";
+import { currentSessionKey } from "@/lib/actor";
 
 /**
  * What each caller has read recently, so the write path can enforce read-before-overwrite.
@@ -20,6 +20,10 @@ const MAX_PATHS = 500;
 
 const reads = new Map<string, Map<string, number>>();
 
+/** A read counts for one note in one workspace: "README.md" read in vault A must not authorise
+ *  overwriting a different "README.md" in vault B. */
+const readKey = (dir: string, relPath: string) => `${dir}\u0000${relPath}`;
+
 function bucket(actor: string): Map<string, number> {
   let b = reads.get(actor);
   if (!b) {
@@ -37,17 +41,17 @@ function prune(b: Map<string, number>, now: number): void {
   for (let i = 0; i < oldestFirst.length - MAX_PATHS; i++) b.delete(oldestFirst[i][0]);
 }
 
-export function recordRead(relPath: string, now: number = Date.now()): void {
+export function recordRead(dir: string, relPath: string, now: number = Date.now()): void {
   if (!relPath) return;
-  const b = bucket(currentActor());
-  b.set(relPath, now);
+  const b = bucket(currentSessionKey());
+  b.set(readKey(dir, relPath), now);
   prune(b, now);
 }
 
-export function hasRead(relPath: string, now: number = Date.now()): boolean {
-  const b = reads.get(currentActor());
+export function hasRead(dir: string, relPath: string, now: number = Date.now()): boolean {
+  const b = reads.get(currentSessionKey());
   if (!b) return false;
-  const at = b.get(relPath);
+  const at = b.get(readKey(dir, relPath));
   return at != null && now - at <= TTL_MS;
 }
 

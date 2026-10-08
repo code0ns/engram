@@ -132,6 +132,22 @@ can see and toggle on the People tab. The first time the page is used, the first
 `ALLOWED_EMAILS` is recorded as the admin — after that nothing depends on env ordering. The last
 admin can't be removed or demoted.
 
+## 8. Several workspaces over MCP
+A credential that can reach more than one workspace needs a way to say which vault a call means:
+
+- **`workspace` argument (recommended):** every workspace tool accepts an optional `workspace` (id or
+  exact name from `brain_workspaces`). It applies to that call only, works in every client, and an
+  unknown or not-yours value is an error, never a fallback.
+- **`brain_use_workspace`:** selects a workspace for the session. A client that echoes the
+  `Mcp-Session-Id` header (Claude Code does) gets its own selection; clients that don't share one
+  selection per credential. Selections live in memory and are forgotten after an hour idle or a restart.
+- **Notice:** a call that lands on the default workspace of a multi-workspace credential carries a
+  one-line notice saying so.
+- **`MCP_REQUIRE_WORKSPACE_FOR_WRITES=true` (optional, off by default):** refuse *writes* that would
+  land on the default by guesswork. Turning it on breaks any agent that never names a workspace, so flip
+  it after each token is pinned to one workspace (Access → Agent connections).
+- The most robust setup needs no flag at all: **one token per workspace**, pinned to it.
+
 ## Notes
 - **No auth locally:** leave `AUTH_SECRET` empty (or `AUTH_DISABLED=true`) and the dashboard is open; the MCP is open until a token exists.
 - Git tokens are stored **encrypted** at rest (keyed off `AUTH_SECRET`); token hashes and vault clones live under `ENGRAM_DATA_DIR`, never in a vault repo.

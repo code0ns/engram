@@ -11,6 +11,7 @@ import { isAllowed } from "@/lib/auth";
 import { listNotes } from "@/lib/vault/store";
 import { selectWorkspace, getSelectedWorkspace, clearSelectedWorkspace } from "./workspace-session";
 import { getLastSyncError } from "@/lib/git";
+import type { EffectiveWorkspace } from "./caller";
 
 /**
  * Workspace management tools for MCP callers.
@@ -37,8 +38,10 @@ export interface WorkspaceInfo {
   globalActive: boolean;
   /** True when this caller's token/identity has access to this workspace. */
   accessible: boolean;
-  /** True when this workspace is the current call's resolved workspace (before any session override). */
+  /** True when this workspace is the credential's default resolution (before any selection). Same as `default`. */
   current?: boolean;
+  /** True when this is where the NEXT call without a `workspace` argument will run (selection, else default). */
+  effective?: boolean;
   /** Note count in the workspace, if available. */
   noteCount?: number;
   /** Clone status: present if the local clone is empty or missing. */
@@ -120,7 +123,14 @@ function repoToWorkspaceInfo(
 export function listAccessibleWorkspaces(
   caller: TokenCaller,
   currentWorkspace: ResolvedWorkspace | null,
-): { workspaces: WorkspaceInfo[]; selected: string | null; current: string | null } {
+  effective: EffectiveWorkspace | null = null,
+): {
+  workspaces: WorkspaceInfo[];
+  selected: string | null;
+  current: string | null;
+  default: string | null;
+  effective: { id: string | null; name: string; source: EffectiveWorkspace["source"] } | null;
+} {
   const allRepos = listRepos();
   const globalActive = getActive();
   const globalActiveId = globalActive?.id ?? null;
@@ -162,10 +172,17 @@ export function listAccessibleWorkspaces(
     }
   }
 
+  const effectiveId = effective?.ws.workspaceId ?? null;
   return {
-    workspaces,
+    workspaces: workspaces.map((w) => ({ ...w, effective: effective !== null && w.id === effectiveId })),
     selected: selectedId,
+    // `current` predates `default` and means the same thing: what the credential resolves to when
+    // nothing is selected. It is NOT where the next call goes — `effective` is.
     current: currentId,
+    default: currentId,
+    effective: effective
+      ? { id: effectiveId, name: effective.ws.name, source: effective.source }
+      : null,
   };
 }
 
@@ -279,13 +296,13 @@ export const WORKSPACE_TOOLS: WorkspaceTool[] = [
   {
     name: "brain_workspaces",
     description:
-      "List all workspaces (vaults) this token can access. Returns each workspace's id, name, fullName (GitHub repo), branch, whether it's the global active workspace, whether this caller has access, whether it's the current session's workspace, and note count. Use this to discover available vaults before switching. `selected` shows the workspace this session has explicitly selected (via brain_use_workspace); `current` shows what the default resolution picked.",
+      "List all workspaces (vaults) this token can access. Returns each workspace's id, name, fullName (GitHub repo), branch, whether it's the global active workspace, whether this caller has access, whether it's the current session's workspace, and note count. Use this to discover available vaults before switching. `effective` is where your NEXT call runs if it names no workspace (with `source`: argument/selection/default) — treat it as the truth. `selected` is the workspace chosen with brain_use_workspace in this session (null if none, or if it expired); `default` (also `current`) is what the credential falls back to when nothing is selected. Selections are shared by every chat using the same token and expire after an hour or a server restart, so when in doubt pass `workspace` (id or exact name) on each call.",
     inputSchema: { type: "object", properties: {} },
   },
   {
     name: "brain_use_workspace",
     description:
-      "Select a workspace for subsequent MCP calls in this session. Pass the workspace `id` from brain_workspaces. This sets a per-session workspace that overrides the default resolution until the session expires (1 hour) or you switch again. Does NOT change the dashboard's global active workspace unless you pass `set_global_active: true` (dangerous — affects what other users see). Returns error if you don't have access to the workspace or it doesn't exist.",
+      "Select a workspace for subsequent MCP calls in this session. Pass the workspace `id` from brain_workspaces. This sets a workspace that overrides the default resolution until it expires (1 hour idle, or a server restart) or you switch again — but it is shared by every chat using the same token, so another session can change it under you. For anything that matters, pass `workspace` on the call instead. Does NOT change the dashboard's global active workspace unless you pass `set_global_active: true` (dangerous — affects what other users see). Returns error if you don't have access to the workspace or it doesn't exist.",
     inputSchema: {
       type: "object",
       properties: {

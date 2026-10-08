@@ -11,11 +11,18 @@
  * stdio server (brain_* only) doesn't serve. Kept short: it is read on every connection.
  */
 
-export function serverInstructions(visible: Iterable<string>): string {
+export function serverInstructions(visible: Iterable<string>, opts: { multiWorkspace?: boolean } = {}): string {
   const has = new Set(visible);
   const lines: string[] = [
     "Engram is this team's shared long-term memory: a markdown vault that other agents and people also read and write. Use it so work carries over between sessions and tools.",
   ];
+
+  // Only for a credential that can reach several workspaces: with one there is nothing to confuse.
+  if (opts.multiWorkspace && has.has("brain_workspaces")) {
+    lines.push(
+      "- This token can reach several workspaces (vaults). Pass `workspace` (id or exact name, see brain_workspaces) on every call: a brain_use_workspace selection is shared by every chat using this token, expires, and can change under you.",
+    );
+  }
 
   const start: string[] = [];
   if (has.has("brain_schema")) start.push("call brain_schema once to learn this vault's folders and conventions");

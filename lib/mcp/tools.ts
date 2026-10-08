@@ -85,7 +85,7 @@ async function writeFromArgs(dir: string, a: Args): Promise<string> {
 async function writeResult(dir: string, a: Args, toolName: string) {
   // Read-before-overwrite. The Curator loop has enforced this for a while; over MCP a coding agent
   // could still clobber a note it had never opened, protected only by the size heuristic in write.ts.
-  const blocked = guardOverwrite(dir, toolName, a.path ? normalizeNotePath(String(a.path)) : "", hasRead);
+  const blocked = guardOverwrite(dir, toolName, a.path ? normalizeNotePath(String(a.path)) : "", (p) => hasRead(dir, p));
   if (blocked) throw new Error(blocked);
   const p = await writeFromArgs(dir, a);
   const n = getNote(dir, p);
@@ -182,7 +182,7 @@ export const TOOLS: Tool[] = [
       // Only a full read authorises a later overwrite. A section read shows you one heading, not
       // what you would destroy — so it deliberately does not unlock brain_write/brain_edit.
       if (!section) {
-        recordRead(n.path);
+        recordRead(dir, n.path);
         return { ...base, content: n.raw };
       }
 

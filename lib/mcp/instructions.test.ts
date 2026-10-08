@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { serverInstructions } from "./instructions";
 import { TOOLS, visibleTools } from "./tools";
+import { WORKSPACE_TOOLS } from "./workspace-tools";
 
 const namesIn = (text: string) => [...new Set(text.match(/\b(?:brain|tool|skill)_[a-z_]+\b/g) ?? [])];
 const visible = (canWrite: boolean, harnessOn: boolean, tregOn: boolean) =>
@@ -51,6 +52,19 @@ describe("serverInstructions", () => {
     expect(text).not.toContain("tool_search");
     expect(text).not.toContain("skill_lint");
     expect(text).toMatch(/Save as you go/);
+  });
+
+  test("a multi-workspace token is told to pass `workspace` on every call; a single-workspace token is not", () => {
+    const names = [...visible(true, false, false), ...WORKSPACE_TOOLS.map((t) => t.name)];
+    const multi = serverInstructions(names, { multiWorkspace: true });
+    expect(multi).toContain("`workspace`");
+    expect(multi).toContain("brain_workspaces");
+    expect(serverInstructions(names, { multiWorkspace: false })).not.toContain("`workspace`");
+    expect(serverInstructions(names)).not.toContain("`workspace`");
+  });
+
+  test("the workspace advice is never given where brain_workspaces isn't offered (stdio server)", () => {
+    expect(serverInstructions(TOOLS.map((t) => t.name), { multiWorkspace: true })).not.toContain("brain_workspaces");
   });
 
   test("stays short — clients load it on every connection", () => {

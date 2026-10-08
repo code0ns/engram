@@ -8,14 +8,19 @@ import { getTool, visibleTools } from "@/lib/mcp/tools";
 import { callTool } from "@/lib/mcp/call";
 import { serverInstructions } from "@/lib/mcp/instructions";
 import { resolveTregConfig, tregEnabled } from "@/lib/treg";
+import { resolveTokenWorkspace, type TokenCaller, type ResolvedWorkspace } from "@/lib/workspace-resolve";
 import {
-  resolveTokenWorkspace,
-  tokenHasWorkspaceAccess,
-  type TokenCaller,
-  type ResolvedWorkspace,
-} from "@/lib/workspace-resolve";
-import { vaultDirFor, listRepos } from "@/lib/repos";
-import { getSelectedWorkspace } from "@/lib/mcp/workspace-session";
+  NO_WORKSPACE_ARG,
+  contentWithNotice,
+  newSessionId,
+  oauthActor,
+  refuseWrite,
+  resolveEffective,
+  sanitizeSessionId,
+  splitWorkspaceArg,
+  withWorkspaceArg,
+  workspaceNotice,
+} from "@/lib/mcp/caller";
 import {
   WORKSPACE_TOOL_MAP,
   WORKSPACE_TOOLS,
@@ -48,35 +53,14 @@ function rpc(id: Json, result?: Json, error?: Json) {
 }
 
 /**
- * Resolve the effective workspace for this caller, respecting session selection.
- *
- * Priority: session selection (if valid) > default resolution (token scope / grants).
- * The session selection must still be validated against the caller's access.
- */
-function resolveEffectiveWorkspace(caller: Caller): ResolvedWorkspace | null {
-  // First check for session selection (requires actor context)
-  const selectedId = getSelectedWorkspace();
-  if (selectedId) {
-    // Validate the caller still has access to the selected workspace
-    if (tokenHasWorkspaceAccess(caller.workspace, selectedId)) {
-      const repo = listRepos().find((r) => r.id === selectedId);
-      if (repo) {
-        return { workspaceId: selectedId, dir: vaultDirFor(selectedId), name: repo.name };
-      }
-    }
-    // Selection is invalid (revoked access or deleted workspace) - fall through to default
-  }
-  return resolveTokenWorkspace(caller.workspace);
-}
-
-/**
  * The tools this caller sees — shared by tools/list and the initialize instructions, so the
  * instructions never name a tool the client can't call.
  */
 function toolsFor(caller: Caller) {
-  // Treg tools show only when this caller's workspace has a Treg token (own or shared).
-  const ws = resolveEffectiveWorkspace(caller);
-  const tregOn = ws ? tregEnabled(resolveTregConfig(ws.workspaceId)) : false;
+  // Treg tools show only when this caller's workspace has a Treg token (own or shared). The list
+  // can't vary per call, so it follows the workspace the caller would land in with no argument.
+  const eff = resolveEffective(caller.workspace);
+  const tregOn = eff ? tregEnabled(resolveTregConfig(eff.ws.workspaceId)) : false;
   const tools = visibleTools(caller.scope === "write", harnessEnabled(), tregOn);
   // Workspace tools are always visible (read-scope sees list, write-scope sees both).
   const wkTools = WORKSPACE_TOOLS.filter((t) => !t.write || caller.scope === "write");
@@ -100,13 +84,21 @@ async function handleMessage(
         protocolVersion: params?.protocolVersion || PROTOCOL,
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: "engram", version: VERSION },
-        instructions: serverInstructions(toolsFor(caller).map((t) => t.name)),
+        instructions: serverInstructions(
+          toolsFor(caller).map((t) => t.name),
+          { multiWorkspace: (resolveEffective(caller.workspace)?.reachable ?? 0) >= 2 },
+        ),
       });
     case "ping":
       return rpc(id, {});
     case "tools/list":
       return rpc(id, {
-        tools: toolsFor(caller).map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
+        tools: toolsFor(caller).map((t) => ({
+          name: t.name,
+          description: t.description,
+          // Every tool that works inside a workspace also takes an optional per-call `workspace`.
+          inputSchema: NO_WORKSPACE_ARG.has(t.name) ? t.inputSchema : withWorkspaceArg(t.inputSchema),
+        })),
       });
     case "tools/call": {
       const toolName = params?.name;
@@ -123,8 +115,11 @@ async function handleMessage(
         try {
           // Actor context is already set by the outer withActor in POST
           let out: unknown;
+          let notice: string | null = null;
+          // brain_sync / brain_sync_status work inside one workspace, so they take `workspace` too.
+          const { workspace: wsArg } = splitWorkspaceArg(params?.arguments ?? {});
           if (toolName === "brain_workspaces") {
-            out = listAccessibleWorkspaces(caller.workspace, defaultWorkspace);
+            out = listAccessibleWorkspaces(caller.workspace, defaultWorkspace, resolveEffective(caller.workspace));
           } else if (toolName === "brain_use_workspace") {
             const args = params?.arguments ?? {};
             const workspaceId = String(args.id ?? "");
@@ -136,25 +131,29 @@ async function handleMessage(
             }
           } else if (toolName === "brain_sync_status") {
             // Sync status needs the effective workspace dir
-            const ws = resolveEffectiveWorkspace(caller);
-            if (!ws) {
+            const eff = resolveEffective(caller.workspace, wsArg);
+            if (!eff) {
               out = { ok: false, error: "no workspace access for this token" };
             } else {
-              out = await getWorkspaceSyncStatus(ws.dir);
+              notice = workspaceNotice(eff);
+              out = await getWorkspaceSyncStatus(eff.ws.dir);
             }
           } else if (toolName === "brain_sync") {
             // Trigger sync needs the effective workspace dir
-            const ws = resolveEffectiveWorkspace(caller);
-            if (!ws) {
+            const eff = resolveEffective(caller.workspace, wsArg);
+            if (!eff) {
               out = { ok: false, error: "no workspace access for this token" };
             } else {
-              out = await triggerWorkspaceSync(ws.dir, `${caller.name}: MCP sync request`);
+              const refusal = refuseWrite(toolName, eff);
+              if (refusal) throw new Error(refusal);
+              notice = workspaceNotice(eff);
+              out = await triggerWorkspaceSync(eff.ws.dir, `${caller.name}: MCP sync request`);
             }
           } else {
             out = { error: `unknown workspace tool: ${toolName}` };
           }
           const text = typeof out === "string" ? out : JSON.stringify(out, null, 2);
-          return rpc(id, { content: [{ type: "text", text }] });
+          return rpc(id, { content: contentWithNotice(text, notice) });
         } catch (e) {
           return rpc(id, { content: [{ type: "text", text: `Error: ${(e as Error)?.message ?? e}` }], isError: true });
         }
@@ -173,18 +172,27 @@ async function handleMessage(
         return rpc(id, undefined, { code: -32601, message: "brain_capture is off — the operator has not enabled it." });
       }
       try {
-        // Resolve the effective workspace (respects session selection)
-        const ws = resolveEffectiveWorkspace(caller);
-        if (!ws) {
+        // Where this call goes: its own `workspace` argument, else the session's selection, else the
+        // default. A bad argument throws (caught below as an error result) — never a silent fallback.
+        // `workspace` is removed from the arguments here so each tool's strict validation still sees
+        // exactly the parameters it declares.
+        const { workspace: wsArg, args: toolArgs } = splitWorkspaceArg(params?.arguments ?? {});
+        const eff = resolveEffective(caller.workspace, wsArg);
+        if (!eff) {
           return rpc(id, undefined, { code: -32001, message: "no workspace access for this token" });
         }
+        const refusal = tool.write ? refuseWrite(tool.name, eff) : null;
+        if (refusal) throw new Error(refusal);
         // Actor context is already set by the outer withActor in POST — this stamps every write
         // this call causes with the caller's name, for the git audit trail. callTool validates
         // `arguments` against the tool's inputSchema first — a malformed call must surface as an
         // error, never as a successful no-op write.
-        const out = await callTool(tool.name, params?.arguments ?? {}, { dir: ws.dir, workspaceId: ws.workspaceId });
+        const out = await callTool(tool.name, (toolArgs ?? {}) as Record<string, unknown>, {
+          dir: eff.ws.dir,
+          workspaceId: eff.ws.workspaceId,
+        });
         const text = typeof out === "string" ? out : JSON.stringify(out, null, 2);
-        return rpc(id, { content: [{ type: "text", text }] });
+        return rpc(id, { content: contentWithNotice(text, workspaceNotice(eff)) });
       } catch (e) {
         return rpc(id, { content: [{ type: "text", text: `Error: ${(e as Error)?.message ?? e}` }], isError: true });
       }
@@ -194,8 +202,8 @@ async function handleMessage(
   }
 }
 
-function jsonResponse(body: Json, status = 200) {
-  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+function jsonResponse(body: Json, status = 200, extraHeaders: Record<string, string> = {}) {
+  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...extraHeaders } });
 }
 
 /**
@@ -211,7 +219,9 @@ async function authenticate(token: string, authRequired: boolean): Promise<Calle
   if (named) return { name: named.name, scope: named.scope, workspace: { kind: "named", workspaceIds: named.workspaceIds } };
   if (oauthEnabled()) {
     const at = await verifyAccessToken(token);
-    if (at) return { name: "oauth", scope: "write", workspace: { kind: "oauth", email: at.sub } };
+    // Per person, not one shared "oauth": workspace selections and read-before-edit tracking are
+    // keyed by this name, and it is what the git audit trail records.
+    if (at) return { name: oauthActor(at.sub), scope: "write", workspace: { kind: "oauth", email: at.sub } };
   }
   return null;
 }
@@ -243,16 +253,23 @@ export async function POST(req: Request) {
     return jsonResponse(rpc(null, undefined, { code: -32700, message: "parse error" }), 400);
   }
 
+  // Session id (streamable-HTTP transport). `initialize` starts a session, so the server issues the
+  // id then (`Mcp-Session-Id` response header); a client that echoes it gets its own workspace
+  // selection and read tracking. One that doesn't still works, sharing state per credential. The id
+  // is only a namespace — unknown or stale ids are not rejected, they simply have empty state.
+  const isInit = !Array.isArray(body) && body?.method === "initialize";
+  const sessionId = isInit ? newSessionId() : sanitizeSessionId(req.headers.get("mcp-session-id"));
+
   // Each message is handled with actor context so session workspace selection works
   if (Array.isArray(body)) {
     const out = await Promise.all(
-      body.map((m) => withActor(caller.name, () => handleMessage(m, caller, defaultWs))),
+      body.map((m) => withActor(caller.name, () => handleMessage(m, caller, defaultWs), sessionId)),
     );
     const filtered = out.filter(Boolean);
     return filtered.length === 0 ? new Response(null, { status: 202 }) : jsonResponse(filtered);
   }
-  const res = await withActor(caller.name, () => handleMessage(body, caller, defaultWs));
-  return res ? jsonResponse(res) : new Response(null, { status: 202 });
+  const res = await withActor(caller.name, () => handleMessage(body, caller, defaultWs), sessionId);
+  return res ? jsonResponse(res, 200, isInit && sessionId ? { "Mcp-Session-Id": sessionId } : {}) : new Response(null, { status: 202 });
 }
 
 // This server is request/response only (no server-initiated SSE stream). When OAuth is on,
